@@ -208,6 +208,11 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
   </div>
 
   <div class="row">
+    <button id="clearSavedBtn" class="danger" style="width:100%">Tyhjennä tallennus ja aloita alusta</button>
+    <small>Pinnat, asetukset ja valitut tiedostot tallentuvat automaattisesti tähän selaimeen.</small>
+  </div>
+
+  <div class="row">
     <small>Projisointipinta täyttää aina koko selainikkunan. Overlay-valikot eivät muuta sen kokoa.</small>
   </div>
 </aside>
@@ -251,6 +256,7 @@ const videoControlsRow=document.getElementById('videoControlsRow');
 const playPauseBtn=document.getElementById('playPauseBtn');
 const restartBtn=document.getElementById('restartBtn');
 const videoInfo=document.getElementById('videoInfo');
+const clearSavedBtn=document.getElementById('clearSavedBtn');
 
 if(!gl){status.textContent='WebGL ei ole käytettävissä tässä selaimessa.';return;}
 
@@ -361,7 +367,7 @@ function createSurface(offset=0){
     nodeIds:[makeNode(ox,oy),makeNode(ox+.42,oy),makeNode(ox+.42,oy+.42),makeNode(ox,oy+.42)],
     texture:makeTexture(),contentType:'none',video:null,objectUrl:null,fileName:'',
     shareFrom:null,opacity:1,visible:true,locked:false,
-    fitMode:'fit',zoom:1,sourceAspect:1
+    fitMode:'fit',zoom:1,sourceAspect:1,hasMedia:false
   };
   s.name='Pinta '+s.id;surfaces.push(s);selectedSurfaceId=s.id;selectedCorner=0;return s;
 }
@@ -563,7 +569,7 @@ function syncPanel(){
   }
   renderSurfaceList();
 }
-function render(){resizeCanvases();renderGL();renderOverlay();syncPanel();}
+function render(){resizeCanvases();renderGL();renderOverlay();syncPanel();scheduleSave();}
 
 function pointerPos(e){
   const r=overlayCanvas.getBoundingClientRect();
@@ -634,6 +640,8 @@ deleteSurfaceBtn.addEventListener('click',()=>{
   if(surfaces.length<=1){status.textContent='Vähintään yksi pinta pitää olla olemassa.';return;}
   const idx=surfaces.findIndex(s=>s.id===selectedSurfaceId),removed=surfaces.splice(idx,1)[0];
   if(removed.objectUrl)URL.revokeObjectURL(removed.objectUrl);
+  if(removed.video){try{removed.video.pause()}catch(_){}}
+  mediaDelete(removed.id).catch(()=>{});
   for(const s of surfaces)if(s.shareFrom===removed.id)s.shareFrom=null;
   for(const id of removed.nodeIds)if(!surfaces.some(s=>s.nodeIds.includes(id)))nodes.delete(id);
   selectedSurfaceId=surfaces[Math.max(0,idx-1)].id;selectedCorner=0;render();
@@ -653,32 +661,45 @@ contentMode.addEventListener('change',()=>{
   render();
 });
 
-fileInput.addEventListener('change',()=>{
-  const s=activeSurface(),file=fileInput.files&&fileInput.files[0];if(!s||!file)return;
-  s.shareFrom=null;
+function loadMedia(s,blob,name){
   if(s.objectUrl){URL.revokeObjectURL(s.objectUrl);s.objectUrl=null;}
   if(s.video){try{s.video.pause()}catch(_){}s.video=null;}
-
-  if(file.type.startsWith('video/')){
-    const url=URL.createObjectURL(file),v=document.createElement('video');
+  const type=blob.type||'';
+  if(type.startsWith('video/')){
+    const url=URL.createObjectURL(blob),v=document.createElement('video');
     v.src=url;v.muted=true;v.loop=true;v.playsInline=true;v.preload='auto';
-    s.objectUrl=url;s.video=v;s.contentType='video';s.fileName=file.name;
+    s.objectUrl=url;s.video=v;s.contentType='video';s.fileName=name;
     v.addEventListener('loadeddata',()=>{
       s.sourceAspect=(v.videoWidth&&v.videoHeight)?(v.videoWidth/v.videoHeight):1;
       gl.bindTexture(gl.TEXTURE_2D,s.texture);
       try{gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,v)}catch(_){}
-      v.play().catch(()=>{});status.textContent=`${s.name}: video ${file.name} ladattu.`;render();
+      v.play().catch(()=>{});status.textContent=`${s.name}: video ${name} ladattu.`;render();
     });
     v.load();
-  }else if(file.type.startsWith('image/')){
-    const img=new Image(),reader=new FileReader();
-    reader.onload=()=>{img.onload=()=>{
+    return true;
+  }
+  if(type.startsWith('image/')){
+    const url=URL.createObjectURL(blob),img=new Image();
+    img.onload=()=>{
+      URL.revokeObjectURL(url);
       s.sourceAspect=(img.width&&img.height)?(img.width/img.height):1;
       gl.bindTexture(gl.TEXTURE_2D,s.texture);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
       gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img);
-      s.contentType='image';s.video=null;s.fileName=file.name;status.textContent=`${s.name}: kuva ${file.name} ladattu.`;render();
-    };img.src=reader.result;};
-    reader.readAsDataURL(file);
+      s.contentType='image';s.video=null;s.fileName=name;status.textContent=`${s.name}: kuva ${name} ladattu.`;render();
+    };
+    img.onerror=()=>{URL.revokeObjectURL(url);status.textContent=`${s.name}: kuvaa ${name} ei voitu avata.`;};
+    img.src=url;
+    return true;
+  }
+  return false;
+}
+
+fileInput.addEventListener('change',()=>{
+  const s=activeSurface(),file=fileInput.files&&fileInput.files[0];if(!s||!file)return;
+  s.shareFrom=null;
+  if(loadMedia(s,file,file.name)){
+    s.hasMedia=true;
+    mediaPut(s.id,file).catch(()=>{status.textContent='Tiedostoa ei voitu tallentaa selaimeen (tila täynnä?). Se toimii, kunnes sivu ladataan uudelleen.';});
   }
   fileInput.value='';render();
 });
@@ -778,8 +799,94 @@ function loop(){
   requestAnimationFrame(loop);
 }
 
+// --- Tallennus: geometria ja asetukset localStorageen, tiedostot IndexedDB:hen ---
+const STATE_KEY='projection-mapper-state-v1';
+let dbPromise=null,saveTimer=null,saveDisabled=false;
+function openDb(){
+  if(!dbPromise)dbPromise=new Promise((resolve,reject)=>{
+    const req=indexedDB.open('projection-mapper',1);
+    req.onupgradeneeded=()=>req.result.createObjectStore('media');
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+  return dbPromise;
+}
+function mediaOp(mode,fn){
+  return openDb().then(db=>new Promise((resolve,reject)=>{
+    const tx=db.transaction('media',mode),req=fn(tx.objectStore('media'));
+    tx.oncomplete=()=>resolve(req.result);
+    tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);
+  }));
+}
+const mediaPut=(id,blob)=>mediaOp('readwrite',st=>st.put(blob,id));
+const mediaGet=id=>mediaOp('readonly',st=>st.get(id));
+const mediaDelete=id=>mediaOp('readwrite',st=>st.delete(id));
+
+function serializeState(){
+  const usedIds=new Set(surfaces.flatMap(s=>s.nodeIds));
+  return{
+    nextNodeId,nextSurfaceId,selectedSurfaceId,selectedCorner,
+    nodes:[...nodes.values()].filter(n=>usedIds.has(n.id)).map(n=>({id:n.id,x:n.x,y:n.y})),
+    surfaces:surfaces.map(s=>({
+      id:s.id,name:s.name,nodeIds:s.nodeIds,shareFrom:s.shareFrom,
+      opacity:s.opacity,visible:s.visible,locked:s.locked,
+      fitMode:s.fitMode,zoom:s.zoom,hasMedia:s.hasMedia,fileName:s.fileName
+    })),
+    ui:{showGrid:showGrid.checked,showAllHandles:showAllHandles.checked,gridSize:gridSize.value}
+  };
+}
+function saveState(){
+  if(saveDisabled)return;
+  try{localStorage.setItem(STATE_KEY,JSON.stringify(serializeState()));}catch(_){}
+}
+function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(saveState,300);}
+window.addEventListener('pagehide',()=>{clearTimeout(saveTimer);saveState();});
+
+function restoreState(){
+  let data;
+  try{data=JSON.parse(localStorage.getItem(STATE_KEY)||'null');}catch(_){return false;}
+  if(!data||!Array.isArray(data.surfaces)||!data.surfaces.length||!Array.isArray(data.nodes))return false;
+  for(const n of data.nodes)nodes.set(n.id,{id:n.id,x:n.x,y:n.y});
+  for(const d of data.surfaces){
+    if(!Array.isArray(d.nodeIds)||d.nodeIds.length!==4||!d.nodeIds.every(id=>nodes.has(id)))continue;
+    surfaces.push({
+      id:d.id,name:d.name||('Pinta '+d.id),nodeIds:d.nodeIds.slice(),
+      texture:makeTexture(),contentType:'none',video:null,objectUrl:null,fileName:d.fileName||'',
+      shareFrom:d.shareFrom||null,opacity:d.opacity??1,visible:d.visible!==false,locked:!!d.locked,
+      fitMode:d.fitMode||'fit',zoom:d.zoom||1,sourceAspect:1,hasMedia:!!d.hasMedia
+    });
+  }
+  if(!surfaces.length){nodes.clear();return false;}
+  nextNodeId=Math.max(data.nextNodeId||1,...nodes.keys())+1;
+  nextSurfaceId=Math.max(data.nextSurfaceId||1,...surfaces.map(s=>s.id))+1;
+  selectedSurfaceId=getSurface(data.selectedSurfaceId)?data.selectedSurfaceId:surfaces[0].id;
+  selectedCorner=Math.min(3,Math.max(0,data.selectedCorner|0));
+  if(data.ui){
+    showGrid.checked=data.ui.showGrid!==false;
+    showAllHandles.checked=data.ui.showAllHandles!==false;
+    if(data.ui.gridSize)gridSize.value=data.ui.gridSize;
+  }
+  for(const s of surfaces){
+    if(!s.hasMedia)continue;
+    mediaGet(s.id).then(blob=>{
+      if(blob&&surfaces.includes(s))loadMedia(s,blob,s.fileName||'tiedosto');
+      else{s.hasMedia=false;scheduleSave();}
+    }).catch(()=>{status.textContent='Tallennettuja tiedostoja ei voitu lukea.';});
+  }
+  status.textContent='Edellinen asetelma palautettu.';
+  return true;
+}
+
+clearSavedBtn.addEventListener('click',async()=>{
+  if(!confirm('Poistetaanko kaikki pinnat, asetukset ja tallennetut tiedostot tästä selaimesta?'))return;
+  saveDisabled=true;clearTimeout(saveTimer);
+  try{localStorage.removeItem(STATE_KEY);}catch(_){}
+  try{await mediaOp('readwrite',st=>st.clear());}catch(_){}
+  location.reload();
+});
+
 resizeCanvases();
-createSurface(0);
+if(!restoreState())createSurface(0);
 render();
 requestAnimationFrame(loop);
 })();
