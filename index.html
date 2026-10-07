@@ -90,6 +90,17 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
 .badge{display:inline-block;padding:3px 7px;border-radius:999px;background:var(--panel3);color:var(--muted);font-size:12px}
 .controls{display:flex;gap:8px;flex-wrap:wrap}
 .controls button{padding:8px 10px;font-size:13px}
+#pointMenu{
+  position:absolute;z-index:30;display:none;min-width:220px;
+  background:var(--panel);backdrop-filter:blur(8px);
+  border:1px solid var(--line);border-radius:10px;padding:6px;
+  box-shadow:0 8px 24px rgba(0,0,0,.5)
+}
+#pointMenu .menu-title{font-size:12px;color:var(--muted);padding:4px 8px 6px}
+#pointMenu button{display:block;width:100%;text-align:left;border:0;background:transparent;padding:8px 10px;font-size:14px}
+#pointMenu button:hover:not(:disabled){background:var(--panel3)}
+#pointMenu button:disabled{color:var(--muted);cursor:default}
+#pointMenu hr{margin:4px 0}
 
 @media(max-width:760px){
   #sidepanel{top:auto;left:12px;right:12px;bottom:12px;width:auto;max-height:55%}
@@ -217,6 +228,8 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
   </div>
 </aside>
 
+<div id="pointMenu" role="menu"></div>
+
 <div id="status">Vedä kulmapisteitä. Pisteet napsahtavat toisiinsa lähellä.</div>
 
 <script>
@@ -257,6 +270,7 @@ const playPauseBtn=document.getElementById('playPauseBtn');
 const restartBtn=document.getElementById('restartBtn');
 const videoInfo=document.getElementById('videoInfo');
 const clearSavedBtn=document.getElementById('clearSavedBtn');
+const pointMenu=document.getElementById('pointMenu');
 
 if(!gl){status.textContent='WebGL ei ole käytettävissä tässä selaimessa.';return;}
 
@@ -672,15 +686,91 @@ function snapCornerIfNeeded(s,i){
   return true;
 }
 
-overlayCanvas.addEventListener('pointerdown',e=>{
-  if(document.body.classList.contains('projection-only'))return;
-  const p=pointerPos(e);let best=null,bestD=Infinity;
+// --- Yhteisten pisteiden irrotus ---
+const DETACH_OFFSET_PX=24; // irrotettu kulma siirtyy näin paljon kohti omaa pintaansa, jotta pisteet erottuvat
+const surfacesUsingNode=id=>surfaces.filter(s=>s.nodeIds.includes(id));
+function detachCorner(s,i){
+  const old=cornerNode(s,i),c=surfaceCenterPx(s),p=pxPoint(old);
+  const vx=c.x-p.x,vy=c.y-p.y,len=Math.hypot(vx,vy)||1;
+  const off=Math.min(DETACH_OFFSET_PX*(window.devicePixelRatio||1),len*0.25);
+  s.nodeIds[i]=makeNode((p.x+vx/len*off)/glCanvas.width,(p.y+vy/len*off)/glCanvas.height);
+  if(!surfaces.some(sf=>sf.nodeIds.includes(old.id)))nodes.delete(old.id);
+}
+function detachSurfaceFromNode(s,nodeId){
+  const i=s.nodeIds.indexOf(nodeId);if(i<0||s.locked)return false;
+  detachCorner(s,i);selectedSurfaceId=s.id;selectedCorner=i;return true;
+}
+// Räjäyttää pisteen: jokainen lukitsematon pinta saa oman kulmapisteensä.
+function explodeNode(nodeId){
+  const users=surfacesUsingNode(nodeId),movable=users.filter(s=>!s.locked);
+  // Jos kaikki pinnat ovat lukitsemattomia, yksi niistä voi jäädä alkuperäiseen pisteeseen.
+  const toDetach=movable.length===users.length?movable.slice(1):movable;
+  toDetach.forEach(s=>detachCorner(s,s.nodeIds.indexOf(nodeId)));
+  return toDetach.length;
+}
+function hitCorner(p){
   const hitX=30/window.innerWidth,hitY=30/window.innerHeight;
+  let best=null,bestD=Infinity;
   for(const s of surfaces){if(!s.visible)continue;for(let i=0;i<4;i++){
     const n=cornerNode(s,i);
     const dx=(n.x-p.x)/hitX,dy=(n.y-p.y)/hitY,d=dx*dx+dy*dy;
-    if(d<1&&d<bestD){bestD=d;best={s,corner:i};}
+    if(d<1&&d<bestD){bestD=d;best={s,corner:i,node:n};}
   }}
+  return best;
+}
+function hidePointMenu(){pointMenu.style.display='none';}
+function showPointMenu(clientX,clientY,hit){
+  const users=surfacesUsingNode(hit.node.id);
+  pointMenu.innerHTML='';
+  const title=document.createElement('div');title.className='menu-title';
+  title.textContent=users.length>1?`Yhteinen piste · ${users.length} pintaa`:`${hit.s.name} · kulma ${hit.corner+1}`;
+  pointMenu.appendChild(title);
+  const item=(text,fn,disabled)=>{
+    const b=document.createElement('button');b.textContent=text;b.disabled=!!disabled;
+    b.addEventListener('click',()=>{hidePointMenu();fn();});pointMenu.appendChild(b);
+  };
+  if(users.length<2){
+    item('Piste ei ole yhteinen muiden kanssa',()=>{},true);
+  }else{
+    item(`Irrota kaikki pinnat toisistaan`,()=>{
+      const n=explodeNode(hit.node.id);
+      status.textContent=n?`Yhteinen piste irrotettiin (${n} ${n===1?'kulma':'kulmaa'} siirrettiin erilleen).`:'Lukittuja pintoja ei irroteta.';
+      render();
+    },users.every(s=>s.locked));
+    pointMenu.appendChild(document.createElement('hr'));
+    for(const s of users){
+      item(`Irrota vain ${s.name}${s.locked?' (lukittu)':''}`,()=>{
+        if(detachSurfaceFromNode(s,hit.node.id))status.textContent=`${s.name}: kulma irrotettiin yhteisestä pisteestä.`;
+        render();
+      },s.locked);
+    }
+  }
+  pointMenu.style.display='block';
+  const w=pointMenu.offsetWidth,h=pointMenu.offsetHeight;
+  pointMenu.style.left=Math.max(8,Math.min(clientX,window.innerWidth-w-8))+'px';
+  pointMenu.style.top=Math.max(8,Math.min(clientY,window.innerHeight-h-8))+'px';
+}
+overlayCanvas.addEventListener('contextmenu',e=>{
+  e.preventDefault();
+  if(isProjectionMode())return;
+  const hit=hitCorner(pointerPos(e));
+  if(!hit){hidePointMenu();return;}
+  selectedSurfaceId=hit.s.id;selectedCorner=hit.corner;render();
+  showPointMenu(e.clientX,e.clientY,hit);
+});
+document.addEventListener('pointerdown',e=>{if(!pointMenu.contains(e.target))hidePointMenu();},true);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')hidePointMenu();});
+window.addEventListener('resize',hidePointMenu);
+
+// Kosketusnäytöllä pitkä painallus kulmapisteen päällä avaa saman valikon.
+let longPress=null;
+function cancelLongPress(){if(longPress){clearTimeout(longPress.timer);longPress=null;}}
+
+overlayCanvas.addEventListener('pointerdown',e=>{
+  if(document.body.classList.contains('projection-only'))return;
+  if(e.button!==0)return; // oikea painike avaa valikon contextmenu-tapahtumassa
+  const p=pointerPos(e);let best=hitCorner(p),bestD=Infinity;
+  const hitX=30/window.innerWidth,hitY=30/window.innerHeight;
   if(!best){
     for(const s of surfaces){
       if(!s.visible||(s.id!==selectedSurfaceId&&!showAllHandles.checked))continue;
@@ -693,9 +783,19 @@ overlayCanvas.addEventListener('pointerdown',e=>{
   selectedSurfaceId=best.s.id;selectedCorner=best.corner;
   if(best.s.locked){render();return;}
   dragging={surfaceId:best.s.id,corner:best.corner,last:p};
+  if(e.pointerType==='touch'&&best.corner!==CENTER){
+    const hit={s:best.s,corner:best.corner,node:cornerNode(best.s,best.corner)};
+    const start={x:e.clientX,y:e.clientY,node:{x:hit.node.x,y:hit.node.y}};
+    longPress={start,timer:setTimeout(()=>{
+      // Palautetaan piste paikalleen, jos sormi ehti liikahtaa, ja avataan valikko raahaamisen sijaan.
+      hit.node.x=start.node.x;hit.node.y=start.node.y;dragging=null;longPress=null;
+      render();showPointMenu(start.x,start.y,hit);
+    },600)};
+  }
   overlayCanvas.setPointerCapture(e.pointerId);render();
 });
 overlayCanvas.addEventListener('pointermove',e=>{
+  if(longPress&&Math.hypot(e.clientX-longPress.start.x,e.clientY-longPress.start.y)>10)cancelLongPress();
   if(!dragging)return;
   const s=getSurface(dragging.surfaceId);if(!s||s.locked)return;
   const p=pointerPos(e);
@@ -704,13 +804,14 @@ overlayCanvas.addEventListener('pointermove',e=>{
   render();
 });
 overlayCanvas.addEventListener('pointerup',e=>{
+  cancelLongPress();
   if(dragging){
     const s=getSurface(dragging.surfaceId);
     if(s&&!s.locked&&dragging.corner!==CENTER&&snapCornerIfNeeded(s,dragging.corner))status.textContent='Kulma napsahti yhteiseen pisteeseen.';
   }
   dragging=null;try{overlayCanvas.releasePointerCapture(e.pointerId)}catch(_){}render();
 });
-overlayCanvas.addEventListener('pointercancel',()=>dragging=null);
+overlayCanvas.addEventListener('pointercancel',()=>{cancelLongPress();dragging=null;});
 
 function addSurface(){
   const off=((surfaces.length*0.025)%0.16);
@@ -735,7 +836,7 @@ detachCornerBtn.addEventListener('click',()=>{
   const old=cornerNode(s,selectedCorner);
   const shared=surfaces.reduce((n,sf)=>n+sf.nodeIds.filter(id=>id===old.id).length,0);
   if(shared<=1){status.textContent='Valittu kulma ei ole yhteinen muiden pintojen kanssa.';return;}
-  s.nodeIds[selectedCorner]=makeNode(old.x,old.y);status.textContent='Valittu kulma irrotettiin yhteisestä pisteestä.';render();
+  detachCorner(s,selectedCorner);status.textContent='Valittu kulma irrotettiin yhteisestä pisteestä.';render();
 });
 
 contentMode.addEventListener('change',()=>{
