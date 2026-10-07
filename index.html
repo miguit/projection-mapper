@@ -193,8 +193,10 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
       <option value="ellipse">Ympyrä / ellipsi</option>
     </select>
     <div id="radiusRow" style="margin-top:10px">
-      <label for="cornerRadius">Nurkkien pyöristys <span id="cornerRadiusValue">0 %</span></label>
+      <label for="cornerRadius">Pyöristys: <strong id="radiusTargetLabel">kaikki kulmat</strong> <span id="cornerRadiusValue">0 %</span></label>
       <input id="cornerRadius" type="range" min="0" max="100" value="0">
+      <div class="controls" style="margin-top:6px"><button id="radiusAllBtn">Sama kaikkiin kulmiin</button></div>
+      <small>Valitse kulma (tai muotopiste) ja säädä sen pyöristystä. Keskikahva valittuna säätö koskee kaikkia kulmia.</small>
     </div>
     <div class="controls" id="editModeRow" style="margin-top:8px">
       <button id="editFrameBtn">Muokkaa kehystä</button>
@@ -297,6 +299,8 @@ const editShapeBtn=document.getElementById('editShapeBtn');
 const radiusRow=document.getElementById('radiusRow');
 const cornerRadius=document.getElementById('cornerRadius');
 const cornerRadiusValue=document.getElementById('cornerRadiusValue');
+const radiusTargetLabel=document.getElementById('radiusTargetLabel');
+const radiusAllBtn=document.getElementById('radiusAllBtn');
 
 if(!gl){status.textContent='WebGL ei ole käytettävissä tässä selaimessa.';return;}
 
@@ -459,7 +463,7 @@ function createSurface(offset=0,kind='quad'){
     texture:makeTexture(),contentType:'none',video:null,objectUrl:null,fileName:'',
     shareFrom:null,opacity:1,visible:true,locked:false,
     fitMode:'fit',zoom:1,sourceAspect:1,hasMedia:false,pattern:null,
-    mask:{kind,points:defaultShapePoints(kind),radius:0},maskTex:null,maskKey:''
+    mask:{kind,points:defaultShapePoints(kind),radii:[]},maskTex:null,maskKey:''
   };
   s.name='Pinta '+s.id;surfaces.push(s);selectedSurfaceId=s.id;selectedCorner=0;return s;
 }
@@ -517,7 +521,20 @@ function defaultShapePoints(kind){
   if(kind!=='poly')return [];
   return [[0,0],[.5,0],[1,0],[1,.5],[1,1],[.5,1],[0,1],[0,.5]].map(([u,v])=>({u,v}));
 }
-const shapeUsesMask=s=>s.mask.kind!=='quad'||s.mask.radius>0;
+const shapeUsesMask=s=>s.mask.kind!=='quad'||s.mask.radii.some(r=>r>0);
+// Pyöristys on kärkikohtainen: radii[i] kuuluu muodon i:nnelle kärjelle (nelikulmiossa kulmat 1-4).
+const vertexCount=s=>s.mask.kind==='poly'?s.mask.points.length:s.mask.kind==='quad'?4:0;
+function ensureRadii(s){
+  const n=vertexCount(s),r=s.mask.radii;
+  while(r.length<n)r.push(0);
+  r.length=n;
+}
+// Mihin kulmaan pyöristyssäädin kohdistuu: kärjen indeksi tai 'all'.
+function radiusTarget(s){
+  if(s.mask.kind==='poly'&&selectedCorner>=SHAPE_BASE)return selectedCorner-SHAPE_BASE;
+  if(s.mask.kind==='quad'&&selectedCorner<CENTER)return selectedCorner;
+  return 'all';
+}
 const SHAPE_NAMES={quad:'Nelikulmio',poly:'Monikulmio (8 pistettä)',ellipse:'Ympyrä / ellipsi'};
 function shapeOutlineUV(s,aspect){
   if(s.mask.kind==='ellipse'){
@@ -525,18 +542,19 @@ function shapeOutlineUV(s,aspect){
     return Array.from({length:96},(_,i)=>{const a=i/96*Math.PI*2;return{u:.5+.5*Math.cos(a),v:.5+.5*Math.sin(a)};});
   }
   const base=s.mask.kind==='poly'?s.mask.points:[{u:0,v:0},{u:1,v:0},{u:1,v:1},{u:0,v:1}];
-  return roundPolygon(base,s.mask.radius,aspect||1);
+  return roundPolygon(base,s.mask.radii,aspect||1);
 }
 // Pyöristää monikulmion kärjet. Lasketaan kehyksen mittasuhteissa (x = u*aspect), jotta
 // pyöristykset ovat ympyränkaaria eivätkä venähdä leveällä pinnalla.
-// radius 0..1: osuus suurimmasta pyöristyksestä, joka mahtuu viereisten sivujen puolikkaisiin.
-function roundPolygon(pts,radius,aspect){
-  if(!(radius>0)||pts.length<3)return pts.map(p=>({u:p.u,v:p.v}));
+// radii[i] 0..1: osuus suurimmasta pyöristyksestä, joka mahtuu kärjen i viereisten sivujen puolikkaisiin.
+function roundPolygon(pts,radii,aspect){
+  if(!radii.some(r=>r>0)||pts.length<3)return pts.map(p=>({u:p.u,v:p.v}));
   const P=pts.map(p=>({x:p.u*aspect,y:p.v})),n=P.length,out=[];
   for(let i=0;i<n;i++){
     const A=P[(i+n-1)%n],B=P[i],C=P[(i+1)%n];
     const la=Math.hypot(A.x-B.x,A.y-B.y),lc=Math.hypot(C.x-B.x,C.y-B.y);
-    if(la<1e-6||lc<1e-6){out.push(B);continue;}
+    const radius=radii[i]||0;
+    if(radius<=0||la<1e-6||lc<1e-6){out.push(B);continue;}
     const da={x:(A.x-B.x)/la,y:(A.y-B.y)/la},dc={x:(C.x-B.x)/lc,y:(C.y-B.y)/lc};
     const theta=Math.acos(Math.max(-1,Math.min(1,da.x*dc.x+da.y*dc.y))); // kärjen sisäkulma
     if(theta>Math.PI-0.02||theta<0.02){out.push(B);continue;}          // suora tai neulanterävä: ei pyöristetä
@@ -774,7 +792,13 @@ function syncPanel(){
   selectedCornerLabel.textContent=selectedCorner>=SHAPE_BASE?('Muotopiste '+(selectedCorner-SHAPE_BASE+1)):cornerNames[selectedCorner];
   shapeKind.value=s.mask.kind;
   radiusRow.style.display=s.mask.kind==='ellipse'?'none':'block';
-  cornerRadius.value=Math.round(s.mask.radius*100);cornerRadiusValue.textContent=Math.round(s.mask.radius*100)+' %';
+  if(s.mask.kind!=='ellipse'){
+    ensureRadii(s);
+    const t=radiusTarget(s),val=t==='all'?Math.max(0,...s.mask.radii):s.mask.radii[t];
+    radiusTargetLabel.textContent=t==='all'?'kaikki kulmat':(s.mask.kind==='poly'?'muotopiste '+(t+1):'kulma '+(t+1));
+    cornerRadius.value=Math.round(val*100);cornerRadiusValue.textContent=Math.round(val*100)+' %';
+    radiusAllBtn.parentElement.style.display=t==='all'?'none':'flex';
+  }
   editModeRow.style.display=s.mask.kind==='poly'?'flex':'none';
   editFrameBtn.classList.toggle('on',!isShapeEditing());editShapeBtn.classList.toggle('on',isShapeEditing());
   rebuildContentMode();
@@ -894,14 +918,16 @@ function hitShapeEdge(p){
 }
 function insertShapePoint(s,afterIndex,p){
   if(s.locked){status.textContent='Pinta on lukittu.';return;}
-  s.mask.points.splice(afterIndex+1,0,screenToUV(s,p));
+  ensureRadii(s);
+  s.mask.points.splice(afterIndex+1,0,screenToUV(s,p));s.mask.radii.splice(afterIndex+1,0,0);
   selectedCorner=SHAPE_BASE+afterIndex+1;
   status.textContent=`Muotopiste lisätty (${s.mask.points.length} pistettä).`;
 }
 function removeShapePoint(s,index){
   if(s.locked){status.textContent='Pinta on lukittu.';return;}
   if(s.mask.points.length<=3){status.textContent='Monikulmiossa pitää olla vähintään 3 pistettä.';return;}
-  s.mask.points.splice(index,1);
+  ensureRadii(s);
+  s.mask.points.splice(index,1);s.mask.radii.splice(index,1);
   selectedCorner=SHAPE_BASE+Math.max(0,index-1);
   status.textContent=`Muotopiste poistettu (${s.mask.points.length} pistettä).`;
 }
@@ -1095,7 +1121,17 @@ function setEditMode(mode){
 editFrameBtn.addEventListener('click',()=>setEditMode('frame'));
 cornerRadius.addEventListener('input',()=>{
   const s=activeSurface();if(!s||s.locked){render();return;}
-  s.mask.radius=Number(cornerRadius.value)/100;render();
+  ensureRadii(s);
+  const v=Number(cornerRadius.value)/100,t=radiusTarget(s);
+  if(t==='all')s.mask.radii.fill(v);else s.mask.radii[t]=v;
+  render();
+});
+radiusAllBtn.addEventListener('click',()=>{
+  const s=activeSurface();if(!s||s.locked)return;
+  ensureRadii(s);
+  const t=radiusTarget(s);if(t==='all')return;
+  s.mask.radii.fill(s.mask.radii[t]);
+  status.textContent=`Pyöristys ${Math.round(s.mask.radii[t]*100)} % asetettiin kaikkiin kulmiin.`;render();
 });
 editShapeBtn.addEventListener('click',()=>setEditMode('shape'));
 shapeKind.addEventListener('change',()=>{
@@ -1104,6 +1140,7 @@ shapeKind.addEventListener('change',()=>{
   if(s.locked){status.textContent='Pinta on lukittu.';render();return;}
   s.mask.kind=kind;
   s.mask.points=kind==='poly'?(s.mask.points.length>=3?s.mask.points:defaultShapePoints('poly')):[];
+  s.mask.radii=[];ensureRadii(s);
   if(kind==='ellipse')status.textContent='Ympyrä sovitetaan kehyksen sisään. Tee kehyksestä neliö, jos haluat ympyrän.';
   editMode=kind==='poly'?'shape':'frame';selectedCorner=kind==='poly'?SHAPE_BASE:0;
   render();
@@ -1311,12 +1348,15 @@ window.addEventListener('pagehide',()=>{clearTimeout(saveTimer);saveState();});
 
 const MASK_KINDS=['quad','poly','ellipse'];
 function restoreMask(m){
-  const out={kind:'quad',points:[],radius:0};
+  const out={kind:'quad',points:[],radii:[]};
   if(!m||!MASK_KINDS.includes(m.kind))return out;
   const pts=Array.isArray(m.points)?m.points.filter(p=>p&&isFinite(p.u)&&isFinite(p.v)).map(p=>({u:+p.u,v:+p.v})):[];
   if(m.kind==='poly'&&pts.length<3)return out;
   out.kind=m.kind;out.points=m.kind==='poly'?pts:[];
-  out.radius=Math.max(0,Math.min(1,+m.radius||0));
+  const clamp=v=>Math.max(0,Math.min(1,+v||0));
+  const n=out.kind==='poly'?pts.length:out.kind==='quad'?4:0;
+  out.radii=Array.isArray(m.radii)?m.radii.slice(0,n).map(clamp):Array(n).fill(clamp(m.radius)); // vanha muoto: yksi radius kaikille
+  while(out.radii.length<n)out.radii.push(0);
   return out;
 }
 function restoreState(){
