@@ -56,7 +56,7 @@ button.danger{border-color:#704040;color:#ffd0d0}
 }
 #status{
   position:absolute;left:12px;bottom:12px;z-index:20;
-  max-width:min(760px,calc(100vw - 400px));
+  max-width:min(760px,max(200px,calc(100vw - 400px)));
   padding:8px 10px;border-radius:9px;
   background:rgba(0,0,0,.62);color:#d6dbe2;font-size:13px;
 }
@@ -152,7 +152,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
   </div>
 
   <div class="row">
-    <label for="opacity">Läpinäkyvyys <span id="opacityValue">100 %</span></label>
+    <label for="opacity">Kirkkaus <span id="opacityValue">100 %</span></label>
     <input id="opacity" type="range" min="0" max="100" value="100">
   </div>
 
@@ -293,8 +293,7 @@ void main(){
   vec2 uv=(v_texCoord-vec2(0.5))/scale+vec2(0.5);
 
   if(u_fitMode < 0.5 && (uv.x<0.0 || uv.x>1.0 || uv.y<0.0 || uv.y>1.0)){
-    gl_FragColor=vec4(0.0,0.0,0.0,1.0);
-    return;
+    discard;
   }
 
   uv=clamp(uv,0.0,1.0);
@@ -572,12 +571,12 @@ function pointerPos(e){
     y:(e.clientY-r.top)/r.height
   };
 }
-function nearestCorner(x,y,excludeSurfaceId,excludeCorner){
+function nearestCorner(x,y,ownSurface){
   let best=null,bestD=Infinity;
   const sx=SNAP_PX/window.innerWidth,sy=SNAP_PX/window.innerHeight;
   for(const s of surfaces)for(let i=0;i<4;i++){
-    if(s.id===excludeSurfaceId&&i===excludeCorner)continue;
     const n=cornerNode(s,i);
+    if(ownSurface.nodeIds.includes(n.id))continue;
     const dx=(n.x-x)/sx,dy=(n.y-y)/sy,d=dx*dx+dy*dy;
     if(d<1&&d<bestD){bestD=d;best={surface:s,corner:i,node:n};}
   }
@@ -588,7 +587,7 @@ function moveNode(id,x,y){
   n.x=Math.max(0,Math.min(1,x));n.y=Math.max(0,Math.min(1,y));
 }
 function snapCornerIfNeeded(s,i){
-  const node=cornerNode(s,i),target=nearestCorner(node.x,node.y,s.id,i);
+  const node=cornerNode(s,i),target=nearestCorner(node.x,node.y,s);
   if(!target)return false;
   const oldId=s.nodeIds[i];s.nodeIds[i]=target.node.id;
   if(!surfaces.some(sf=>sf.nodeIds.includes(oldId)))nodes.delete(oldId);
@@ -599,11 +598,11 @@ overlayCanvas.addEventListener('pointerdown',e=>{
   if(document.body.classList.contains('projection-only'))return;
   const p=pointerPos(e);let best=null,bestD=Infinity;
   const hitX=30/window.innerWidth,hitY=30/window.innerHeight;
-  for(const s of surfaces)for(let i=0;i<4;i++){
+  for(const s of surfaces){if(!s.visible)continue;for(let i=0;i<4;i++){
     const n=cornerNode(s,i);
     const dx=(n.x-p.x)/hitX,dy=(n.y-p.y)/hitY,d=dx*dx+dy*dy;
     if(d<1&&d<bestD){bestD=d;best={s,corner:i};}
-  }
+  }}
   if(!best)return;
   selectedSurfaceId=best.s.id;selectedCorner=best.corner;
   if(best.s.locked){render();return;}
