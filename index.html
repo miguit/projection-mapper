@@ -1,0 +1,769 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Projection Mapper – Overlay UI</title>
+<style>
+:root{
+  color-scheme:dark;
+  --panel:rgba(18,21,27,.94);
+  --panel2:#232833;
+  --panel3:#2b3240;
+  --text:#f4f6f8;
+  --muted:#a9b0bb;
+  --line:#39414d;
+  --accent:#58a6ff;
+}
+*{box-sizing:border-box}
+html,body{
+  margin:0;width:100%;height:100%;overflow:hidden;background:#000;
+  color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+}
+button,input,select{font:inherit}
+button,.file-label{
+  background:var(--panel2);color:var(--text);
+  border:1px solid var(--line);border-radius:9px;
+  padding:9px 11px;cursor:pointer
+}
+button:hover,.file-label:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:#08111d;border-color:var(--accent);font-weight:700}
+button.danger{border-color:#704040;color:#ffd0d0}
+.file-label input{display:none}
+
+/* Projection output is ALWAYS full window */
+#outputRoot{
+  position:absolute;inset:0;background:#000;overflow:hidden;
+}
+#glCanvas,#overlayCanvas{
+  position:absolute;inset:0;width:100%;height:100%;display:block;
+}
+#overlayCanvas{touch-action:none}
+
+/* UI floats over the output and never affects its size */
+#topbar{
+  position:absolute;left:12px;top:12px;right:12px;
+  display:flex;gap:8px;flex-wrap:wrap;
+  pointer-events:auto;z-index:20;
+}
+#sidepanel{
+  position:absolute;right:12px;top:64px;bottom:12px;
+  width:min(360px,calc(100vw - 24px));
+  overflow:auto;
+  background:var(--panel);backdrop-filter:blur(8px);
+  border:1px solid var(--line);border-radius:12px;
+  padding:14px;z-index:20;
+}
+#status{
+  position:absolute;left:12px;bottom:12px;z-index:20;
+  max-width:min(760px,calc(100vw - 400px));
+  padding:8px 10px;border-radius:9px;
+  background:rgba(0,0,0,.62);color:#d6dbe2;font-size:13px;
+}
+body.projection-only #topbar,
+body.projection-only #sidepanel,
+body.projection-only #status{display:none}
+
+h2{font-size:18px;margin:0 0 12px}
+.surface-list{display:grid;gap:8px;margin:10px 0 14px}
+.surface-item{
+  display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;
+  padding:8px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)
+}
+.surface-item.active{border-color:var(--accent);background:var(--panel3)}
+.surface-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}
+.row{margin:14px 0}
+.row label{display:block;font-size:14px;margin-bottom:6px}
+.row small{display:block;color:var(--muted);line-height:1.35;margin-top:5px}
+.check{display:flex!important;gap:8px;align-items:center}
+select,input[type=range]{width:100%}
+select{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px}
+.nudge{
+  display:grid;grid-template-columns:repeat(3,42px);grid-template-rows:repeat(3,42px);
+  gap:5px;justify-content:start
+}
+.nudge button{padding:0}
+.nudge .up{grid-column:2;grid-row:1}.nudge .left{grid-column:1;grid-row:2}
+.nudge .right{grid-column:3;grid-row:2}.nudge .down{grid-column:2;grid-row:3}
+hr{border:0;border-top:1px solid var(--line);margin:14px 0}
+.badge{display:inline-block;padding:3px 7px;border-radius:999px;background:var(--panel3);color:var(--muted);font-size:12px}
+.controls{display:flex;gap:8px;flex-wrap:wrap}
+.controls button{padding:8px 10px;font-size:13px}
+
+@media(max-width:760px){
+  #sidepanel{top:auto;left:12px;right:12px;bottom:12px;width:auto;max-height:55%}
+  #status{display:none}
+}
+</style>
+</head>
+<body>
+
+<div id="outputRoot">
+  <canvas id="glCanvas"></canvas>
+  <canvas id="overlayCanvas"></canvas>
+</div>
+
+<div id="topbar">
+  <button id="addSurfaceBtn" class="primary">+ Lisää pinta</button>
+  <button id="projectionBtn">Projisointitila</button>
+  <button id="fullscreenBtn">Koko näyttö</button>
+  <button id="resetViewBtn">Palauta näkymä</button>
+</div>
+
+<aside id="sidepanel">
+  <h2>Pinnat</h2>
+  <div class="surface-list" id="surfaceList"></div>
+  <button id="addSurfaceBtn2" class="primary" style="width:100%">+ Lisää pinta</button>
+
+  <hr>
+
+  <div class="row">
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+      <strong id="activeName">Pinta 1</strong>
+      <span class="badge" id="surfaceCount">1 pinta</span>
+    </div>
+  </div>
+
+  <div class="row">
+    <label for="contentMode">Sisältö</label>
+    <select id="contentMode"></select>
+    <small>Oma kuva/video tai sama sisältö kuin toisella pinnalla.</small>
+  </div>
+
+  <div class="row" id="ownContentRow">
+    <label class="file-label" style="display:block;text-align:center">
+      Valitse kuva tai video
+      <input id="fileInput" type="file" accept="image/*,video/*">
+    </label>
+    <small id="fileName">Ei sisältöä valittuna.</small>
+  </div>
+
+  <div class="row" id="videoControlsRow" style="display:none">
+    <div class="controls">
+      <button id="playPauseBtn">Pause</button>
+      <button id="restartBtn">Restart</button>
+    </div>
+    <small id="videoInfo"></small>
+  </div>
+
+  <div class="row">
+    <label class="check"><input id="surfaceVisible" type="checkbox" checked> Näytä pinta</label>
+    <label class="check"><input id="surfaceLocked" type="checkbox"> Lukitse pinta</label>
+  </div>
+
+  <div class="row">
+    <label for="opacity">Läpinäkyvyys <span id="opacityValue">100 %</span></label>
+    <input id="opacity" type="range" min="0" max="100" value="100">
+  </div>
+
+  <div class="row">
+    <label for="fitMode">Kuvan/videon sovitus</label>
+    <select id="fitMode">
+      <option value="fit" selected>Säilytä kuvasuhde (Fit)</option>
+      <option value="fill">Täytä pinta (Fill)</option>
+      <option value="stretch">Venytä pintaan (Stretch)</option>
+    </select>
+    <small>Fit säilyttää kuvasuhteen. Fill rajaa tarvittaessa reunoilta. Stretch venyttää sisällön tarkoituksella koko pintaan.</small>
+  </div>
+
+  <div class="row">
+    <label for="zoom">Zoom <span id="zoomValue">100 %</span></label>
+    <input id="zoom" type="range" min="25" max="400" value="100" step="1">
+    <small>Alle 100 % loitontaa, yli 100 % zoomaa sisään. Toimii sekä kuville että videoille.</small>
+  </div>
+
+  <div class="row">
+    <label class="check"><input id="showGrid" type="checkbox" checked> Näytä aktiivisen pinnan ruudukko</label>
+    <label class="check"><input id="showAllHandles" type="checkbox" checked> Näytä muiden pintojen kulmapisteet</label>
+  </div>
+
+  <div class="row">
+    <label for="gridSize">Ruudukko</label>
+    <select id="gridSize">
+      <option value="4">4 × 4</option>
+      <option value="8" selected>8 × 8</option>
+      <option value="12">12 × 12</option>
+    </select>
+  </div>
+
+  <hr>
+
+  <div class="row">
+    <label>Valittu kulma: <strong id="selectedCornerLabel">Vasen ylä</strong></label>
+    <div class="nudge">
+      <button class="up" data-dx="0" data-dy="-1">↑</button>
+      <button class="left" data-dx="-1" data-dy="0">←</button>
+      <button class="right" data-dx="1" data-dy="0">→</button>
+      <button class="down" data-dx="0" data-dy="1">↓</button>
+    </div>
+    <small>Hienosäätö suhteessa koko projisointipintaan. Yhteiset pisteet liikkuvat yhdessä.</small>
+  </div>
+
+  <hr>
+
+  <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">
+    <button id="detachCornerBtn">Irrota valittu kulma</button>
+    <button id="deleteSurfaceBtn" class="danger">Poista pinta</button>
+  </div>
+
+  <div class="row">
+    <small>Projisointipinta täyttää aina koko selainikkunan. Overlay-valikot eivät muuta sen kokoa.</small>
+  </div>
+</aside>
+
+<div id="status">Vedä kulmapisteitä. Pisteet napsahtavat toisiinsa lähellä.</div>
+
+<script>
+(() => {
+const glCanvas=document.getElementById('glCanvas');
+const overlayCanvas=document.getElementById('overlayCanvas');
+const gl=glCanvas.getContext('webgl',{alpha:false,antialias:true});
+const octx=overlayCanvas.getContext('2d');
+
+const surfaceList=document.getElementById('surfaceList');
+const addSurfaceBtn=document.getElementById('addSurfaceBtn');
+const addSurfaceBtn2=document.getElementById('addSurfaceBtn2');
+const deleteSurfaceBtn=document.getElementById('deleteSurfaceBtn');
+const projectionBtn=document.getElementById('projectionBtn');
+const fullscreenBtn=document.getElementById('fullscreenBtn');
+const resetViewBtn=document.getElementById('resetViewBtn');
+const fileInput=document.getElementById('fileInput');
+const fileName=document.getElementById('fileName');
+const activeName=document.getElementById('activeName');
+const surfaceCount=document.getElementById('surfaceCount');
+const surfaceVisible=document.getElementById('surfaceVisible');
+const surfaceLocked=document.getElementById('surfaceLocked');
+const opacity=document.getElementById('opacity');
+const opacityValue=document.getElementById('opacityValue');
+const fitMode=document.getElementById('fitMode');
+const zoom=document.getElementById('zoom');
+const zoomValue=document.getElementById('zoomValue');
+const showGrid=document.getElementById('showGrid');
+const showAllHandles=document.getElementById('showAllHandles');
+const gridSize=document.getElementById('gridSize');
+const selectedCornerLabel=document.getElementById('selectedCornerLabel');
+const detachCornerBtn=document.getElementById('detachCornerBtn');
+const status=document.getElementById('status');
+const contentMode=document.getElementById('contentMode');
+const ownContentRow=document.getElementById('ownContentRow');
+const videoControlsRow=document.getElementById('videoControlsRow');
+const playPauseBtn=document.getElementById('playPauseBtn');
+const restartBtn=document.getElementById('restartBtn');
+const videoInfo=document.getElementById('videoInfo');
+
+if(!gl){status.textContent='WebGL ei ole käytettävissä tässä selaimessa.';return;}
+
+const vs=`attribute vec2 a_position;attribute vec2 a_texCoord;varying vec2 v_texCoord;void main(){gl_Position=vec4(a_position,0.0,1.0);v_texCoord=a_texCoord;}`;
+const fs=`precision mediump float;
+uniform sampler2D u_image;
+uniform float u_opacity;
+uniform float u_hasImage;
+uniform float u_sourceAspect;
+uniform float u_surfaceAspect;
+uniform float u_fitMode;
+uniform float u_zoom;
+varying vec2 v_texCoord;
+
+void main(){
+  if(u_hasImage < 0.5){
+    gl_FragColor=vec4(1.0*u_opacity,1.0*u_opacity,1.0*u_opacity,1.0);
+    return;
+  }
+
+  vec2 scale=vec2(1.0);
+
+  if(u_fitMode < 0.5){
+    // FIT: whole image visible, preserve aspect ratio.
+    if(u_sourceAspect > u_surfaceAspect){
+      scale.y=u_surfaceAspect/u_sourceAspect;
+    }else{
+      scale.x=u_sourceAspect/u_surfaceAspect;
+    }
+  }else if(u_fitMode < 1.5){
+    // FILL: surface filled, preserve aspect ratio, crop excess.
+    if(u_sourceAspect > u_surfaceAspect){
+      scale.x=u_sourceAspect/u_surfaceAspect;
+    }else{
+      scale.y=u_surfaceAspect/u_sourceAspect;
+    }
+  }
+
+  scale*=u_zoom;
+
+  vec2 uv=(v_texCoord-vec2(0.5))/scale+vec2(0.5);
+
+  if(u_fitMode < 0.5 && (uv.x<0.0 || uv.x>1.0 || uv.y<0.0 || uv.y>1.0)){
+    gl_FragColor=vec4(0.0,0.0,0.0,1.0);
+    return;
+  }
+
+  uv=clamp(uv,0.0,1.0);
+  vec4 c=texture2D(u_image,uv);
+  vec3 rgb=c.rgb*c.a;
+  gl_FragColor=vec4(rgb*u_opacity,1.0);
+}`;
+
+function compile(type,src){
+  const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const program=gl.createProgram();
+gl.attachShader(program,compile(gl.VERTEX_SHADER,vs));
+gl.attachShader(program,compile(gl.FRAGMENT_SHADER,fs));
+gl.linkProgram(program);gl.useProgram(program);
+
+const posLoc=gl.getAttribLocation(program,'a_position');
+const texLoc=gl.getAttribLocation(program,'a_texCoord');
+const opLoc=gl.getUniformLocation(program,'u_opacity');
+const imgLoc=gl.getUniformLocation(program,'u_image');
+const hasImgLoc=gl.getUniformLocation(program,'u_hasImage');
+const sourceAspectLoc=gl.getUniformLocation(program,'u_sourceAspect');
+const surfaceAspectLoc=gl.getUniformLocation(program,'u_surfaceAspect');
+const fitModeLoc=gl.getUniformLocation(program,'u_fitMode');
+const zoomLoc=gl.getUniformLocation(program,'u_zoom');
+const posBuffer=gl.createBuffer(),texBuffer=gl.createBuffer();
+
+const cornerNames=['Vasen ylä','Oikea ylä','Oikea ala','Vasen ala'];
+const SNAP_PX=18;
+
+let nextNodeId=1,nextSurfaceId=1,selectedSurfaceId=null,selectedCorner=0,dragging=null;
+const nodes=new Map(),surfaces=[];
+
+function resizeCanvases(){
+  const dpr=Math.max(1,window.devicePixelRatio||1);
+  const w=Math.max(1,Math.round(window.innerWidth*dpr));
+  const h=Math.max(1,Math.round(window.innerHeight*dpr));
+  if(glCanvas.width!==w||glCanvas.height!==h){
+    glCanvas.width=w;glCanvas.height=h;
+    overlayCanvas.width=w;overlayCanvas.height=h;
+  }
+}
+window.addEventListener('resize',()=>{resizeCanvases();render();});
+document.addEventListener('fullscreenchange',()=>{setTimeout(()=>{resizeCanvases();render();},50);});
+
+function makeNode(x,y){ // normalized 0..1
+  const n={id:nextNodeId++,x,y};nodes.set(n.id,n);return n.id;
+}
+function makeTexture(){
+  const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([0,0,0,255]));
+  return t;
+}
+function createSurface(offset=0){
+  const ox=0.10+offset,oy=0.12+offset;
+  const s={
+    id:nextSurfaceId++,name:'',
+    nodeIds:[makeNode(ox,oy),makeNode(ox+.42,oy),makeNode(ox+.42,oy+.42),makeNode(ox,oy+.42)],
+    texture:makeTexture(),contentType:'none',video:null,objectUrl:null,fileName:'',
+    shareFrom:null,opacity:1,visible:true,locked:false,
+    fitMode:'fit',zoom:1,sourceAspect:1
+  };
+  s.name='Pinta '+s.id;surfaces.push(s);selectedSurfaceId=s.id;selectedCorner=0;return s;
+}
+const getSurface=id=>surfaces.find(s=>s.id===id);
+const activeSurface=()=>getSurface(selectedSurfaceId);
+const cornerNode=(s,i)=>nodes.get(s.nodeIds[i]);
+
+function resolveContentSurface(s,seen=new Set()){
+  if(!s)return null;
+  if(seen.has(s.id))return s;
+  seen.add(s.id);
+  if(s.shareFrom){
+    const src=getSurface(s.shareFrom);
+    return src?resolveContentSurface(src,seen):s;
+  }
+  return s;
+}
+function isVideoSurface(s){
+  const src=resolveContentSurface(s);
+  return src&&src.contentType==='video'&&src.video;
+}
+
+function pxPoint(n){return{x:n.x*glCanvas.width,y:n.y*glCanvas.height};}
+function Hsq(p0,p1,p2,p3){
+  const x0=p0.x,y0=p0.y,x1=p1.x,y1=p1.y,x2=p2.x,y2=p2.y,x3=p3.x,y3=p3.y;
+  const dx1=x1-x2,dx2=x3-x2,dx3=x0-x1+x2-x3,dy1=y1-y2,dy2=y3-y2,dy3=y0-y1+y2-y3;
+  let g=0,h=0,den=dx1*dy2-dx2*dy1;
+  if((Math.abs(dx3)>1e-10||Math.abs(dy3)>1e-10)&&Math.abs(den)>1e-10){
+    g=(dx3*dy2-dx2*dy3)/den;h=(dx1*dy3-dx3*dy1)/den;
+  }
+  return [x1-x0+g*x1,x3-x0+h*x3,x0,y1-y0+g*y1,y3-y0+h*y3,y0,g,h,1];
+}
+function applyH(H,u,v){
+  const w=H[6]*u+H[7]*v+H[8];
+  return{x:(H[0]*u+H[1]*v+H[2])/w,y:(H[3]*u+H[4]*v+H[5])/w};
+}
+const toClip=p=>[p.x/glCanvas.width*2-1,1-p.y/glCanvas.height*2];
+
+function distance(a,b){
+  const dx=a.x-b.x,dy=a.y-b.y;
+  return Math.sqrt(dx*dx+dy*dy);
+}
+function surfaceAspectFromPoints(pts){
+  const top=distance(pts[0],pts[1]);
+  const bottom=distance(pts[3],pts[2]);
+  const left=distance(pts[0],pts[3]);
+  const right=distance(pts[1],pts[2]);
+  const w=(top+bottom)/2;
+  const h=(left+right)/2;
+  return h>0.0001 ? w/h : 1.0;
+}
+
+function updateVideoTexture(src){
+  if(!src||src.contentType!=='video'||!src.video)return;
+  const v=src.video;
+  if(v.readyState>=2){
+    gl.bindTexture(gl.TEXTURE_2D,src.texture);
+    try{
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,v);
+    }catch(_){}
+  }
+}
+function renderSurfaceGL(s){
+  if(!s.visible)return;
+  const src=resolveContentSurface(s);
+  if(src)updateVideoTexture(src);
+  const pts=s.nodeIds.map(id=>pxPoint(nodes.get(id)));
+  const H=Hsq(...pts),N=30,verts=[],uvs=[];
+  const push=(u,v)=>{
+    const p=applyH(H,u,v),c=toClip(p);
+    verts.push(c[0],c[1]);uvs.push(u,v);
+  };
+  for(let y=0;y<N;y++){
+    const v0=y/N,v1=(y+1)/N;
+    for(let x=0;x<N;x++){
+      const u0=x/N,u1=(x+1)/N;
+      push(u0,v0);push(u1,v0);push(u1,v1);
+      push(u0,v0);push(u1,v1);push(u0,v1);
+    }
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER,posBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(verts),gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(posLoc);gl.vertexAttribPointer(posLoc,2,gl.FLOAT,false,0,0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER,texBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(uvs),gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(texLoc);gl.vertexAttribPointer(texLoc,2,gl.FLOAT,false,0,0);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,src?src.texture:s.texture);
+  gl.uniform1i(imgLoc,0);
+  gl.uniform1f(opLoc,s.opacity);
+  gl.uniform1f(hasImgLoc,src&&src.contentType!=='none'?1:0);
+
+  const srcAspect=(src&&src.sourceAspect)?src.sourceAspect:1;
+  const surfAspect=surfaceAspectFromPoints(pts);
+  gl.uniform1f(sourceAspectLoc,Math.max(0.0001,srcAspect));
+  gl.uniform1f(surfaceAspectLoc,Math.max(0.0001,surfAspect));
+  gl.uniform1f(fitModeLoc,s.fitMode==='fit'?0:(s.fitMode==='fill'?1:2));
+  gl.uniform1f(zoomLoc,Math.max(0.01,s.zoom||1));
+
+  gl.drawArrays(gl.TRIANGLES,0,verts.length/2);
+}
+function renderGL(){
+  gl.viewport(0,0,glCanvas.width,glCanvas.height);
+  gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(program);
+  surfaces.forEach(renderSurfaceGL);
+}
+
+function drawGridForSurface(s){
+  if(!showGrid.checked||s.id!==selectedSurfaceId)return;
+  const pts=s.nodeIds.map(id=>pxPoint(nodes.get(id)));
+  const H=Hsq(...pts),n=Number(gridSize.value)||8;
+  octx.save();octx.strokeStyle='rgba(255,255,255,.45)';octx.lineWidth=Math.max(1,window.devicePixelRatio||1);
+  for(let i=0;i<=n;i++){
+    const t=i/n;
+    let p=applyH(H,t,0);octx.beginPath();octx.moveTo(p.x,p.y);
+    for(let k=1;k<=70;k++){const q=applyH(H,t,k/70);octx.lineTo(q.x,q.y)}octx.stroke();
+    p=applyH(H,0,t);octx.beginPath();octx.moveTo(p.x,p.y);
+    for(let k=1;k<=70;k++){const q=applyH(H,k/70,t);octx.lineTo(q.x,q.y)}octx.stroke();
+  }
+  octx.restore();
+}
+function drawOutline(s){
+  const active=s.id===selectedSurfaceId,pts=s.nodeIds.map(id=>pxPoint(nodes.get(id)));
+  octx.save();octx.beginPath();octx.moveTo(pts[0].x,pts[0].y);
+  for(let i=1;i<4;i++)octx.lineTo(pts[i].x,pts[i].y);
+  octx.closePath();
+  octx.strokeStyle=active?'rgba(88,166,255,.95)':'rgba(255,255,255,.32)';
+  octx.lineWidth=(active?2.5:1.4)*(window.devicePixelRatio||1);
+  octx.stroke();octx.restore();
+}
+function drawHandles(s){
+  const active=s.id===selectedSurfaceId;
+  if(!active&&!showAllHandles.checked)return;
+  const dpr=window.devicePixelRatio||1;
+  for(let i=0;i<4;i++){
+    const p=pxPoint(cornerNode(s,i));
+    octx.beginPath();
+    octx.arc(p.x,p.y,(active&&i===selectedCorner?13:active?10:7)*dpr,0,Math.PI*2);
+    octx.fillStyle=active?'#fff':'rgba(255,255,255,.55)';octx.fill();
+    octx.lineWidth=(active&&i===selectedCorner?3:2)*dpr;
+    octx.strokeStyle=active&&i===selectedCorner?'#58a6ff':'rgba(0,0,0,.7)';octx.stroke();
+    if(active){
+      octx.fillStyle='#000';octx.font=`bold ${12*dpr}px system-ui`;
+      octx.textAlign='center';octx.textBaseline='middle';octx.fillText(String(i+1),p.x,p.y);
+    }
+  }
+}
+function renderOverlay(){
+  octx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);
+  if(document.body.classList.contains('projection-only'))return;
+  surfaces.forEach(drawOutline);surfaces.forEach(drawGridForSurface);surfaces.forEach(drawHandles);
+}
+
+function rebuildContentMode(){
+  const s=activeSurface();if(!s)return;
+  contentMode.innerHTML='';
+  const own=document.createElement('option');own.value='own';own.textContent='Oma sisältö';contentMode.appendChild(own);
+  for(const other of surfaces){
+    if(other.id===s.id)continue;
+    const opt=document.createElement('option');opt.value='share:'+other.id;opt.textContent='Sama sisältö kuin '+other.name;contentMode.appendChild(opt);
+  }
+  contentMode.value=s.shareFrom?('share:'+s.shareFrom):'own';
+}
+function renderSurfaceList(){
+  surfaceList.innerHTML='';
+  for(const s of surfaces){
+    const div=document.createElement('div');div.className='surface-item'+(s.id===selectedSurfaceId?' active':'');
+    const name=document.createElement('button');name.className='surface-name';
+    name.style.textAlign='left';name.style.background='transparent';name.style.border='0';name.style.padding='0';
+    name.textContent=s.name;name.addEventListener('click',()=>{selectedSurfaceId=s.id;selectedCorner=0;render();});
+    const vis=document.createElement('button');vis.textContent=s.visible?'👁':'—';vis.addEventListener('click',()=>{s.visible=!s.visible;render();});
+    const lock=document.createElement('button');lock.textContent=s.locked?'🔒':'🔓';lock.addEventListener('click',()=>{s.locked=!s.locked;render();});
+    div.append(name,vis,lock);surfaceList.appendChild(div);
+  }
+}
+function syncPanel(){
+  const s=activeSurface();if(!s)return;
+  activeName.textContent=s.name;
+  surfaceCount.textContent=surfaces.length+(surfaces.length===1?' pinta':' pintaa');
+  surfaceVisible.checked=s.visible;surfaceLocked.checked=s.locked;
+  opacity.value=Math.round(s.opacity*100);opacityValue.textContent=Math.round(s.opacity*100)+' %';
+  fitMode.value=s.fitMode||'fit';
+  zoom.value=Math.round((s.zoom||1)*100);
+  zoomValue.textContent=Math.round((s.zoom||1)*100)+' %';
+  selectedCornerLabel.textContent=cornerNames[selectedCorner];
+  rebuildContentMode();
+  ownContentRow.style.display=s.shareFrom?'none':'block';
+  const src=resolveContentSurface(s);
+  fileName.textContent=s.shareFrom?('Jaettu sisältö: '+(src?src.name:'-')):(s.fileName||'Ei sisältöä valittuna.');
+  const videoActive=isVideoSurface(s);
+  videoControlsRow.style.display=videoActive?'block':'none';
+  if(videoActive){
+    const v=src.video;playPauseBtn.textContent=v.paused?'Play':'Pause';
+    videoInfo.textContent=(src.fileName||'Video')+(isFinite(v.duration)?' · '+v.duration.toFixed(1)+' s':'');
+  }
+  renderSurfaceList();
+}
+function render(){resizeCanvases();renderGL();renderOverlay();syncPanel();}
+
+function pointerPos(e){
+  const r=overlayCanvas.getBoundingClientRect();
+  return{
+    x:(e.clientX-r.left)/r.width,
+    y:(e.clientY-r.top)/r.height
+  };
+}
+function nearestCorner(x,y,excludeSurfaceId,excludeCorner){
+  let best=null,bestD=Infinity;
+  const sx=SNAP_PX/window.innerWidth,sy=SNAP_PX/window.innerHeight;
+  for(const s of surfaces)for(let i=0;i<4;i++){
+    if(s.id===excludeSurfaceId&&i===excludeCorner)continue;
+    const n=cornerNode(s,i);
+    const dx=(n.x-x)/sx,dy=(n.y-y)/sy,d=dx*dx+dy*dy;
+    if(d<1&&d<bestD){bestD=d;best={surface:s,corner:i,node:n};}
+  }
+  return best;
+}
+function moveNode(id,x,y){
+  const n=nodes.get(id);if(!n)return;
+  n.x=Math.max(0,Math.min(1,x));n.y=Math.max(0,Math.min(1,y));
+}
+function snapCornerIfNeeded(s,i){
+  const node=cornerNode(s,i),target=nearestCorner(node.x,node.y,s.id,i);
+  if(!target)return false;
+  const oldId=s.nodeIds[i];s.nodeIds[i]=target.node.id;
+  if(!surfaces.some(sf=>sf.nodeIds.includes(oldId)))nodes.delete(oldId);
+  return true;
+}
+
+overlayCanvas.addEventListener('pointerdown',e=>{
+  if(document.body.classList.contains('projection-only'))return;
+  const p=pointerPos(e);let best=null,bestD=Infinity;
+  const hitX=30/window.innerWidth,hitY=30/window.innerHeight;
+  for(const s of surfaces)for(let i=0;i<4;i++){
+    const n=cornerNode(s,i);
+    const dx=(n.x-p.x)/hitX,dy=(n.y-p.y)/hitY,d=dx*dx+dy*dy;
+    if(d<1&&d<bestD){bestD=d;best={s,corner:i};}
+  }
+  if(!best)return;
+  selectedSurfaceId=best.s.id;selectedCorner=best.corner;
+  if(best.s.locked){render();return;}
+  dragging={surfaceId:best.s.id,corner:best.corner};
+  overlayCanvas.setPointerCapture(e.pointerId);render();
+});
+overlayCanvas.addEventListener('pointermove',e=>{
+  if(!dragging)return;
+  const s=getSurface(dragging.surfaceId);if(!s||s.locked)return;
+  const p=pointerPos(e);moveNode(s.nodeIds[dragging.corner],p.x,p.y);render();
+});
+overlayCanvas.addEventListener('pointerup',e=>{
+  if(dragging){
+    const s=getSurface(dragging.surfaceId);
+    if(s&&!s.locked&&snapCornerIfNeeded(s,dragging.corner))status.textContent='Kulma napsahti yhteiseen pisteeseen.';
+  }
+  dragging=null;try{overlayCanvas.releasePointerCapture(e.pointerId)}catch(_){}render();
+});
+overlayCanvas.addEventListener('pointercancel',()=>dragging=null);
+
+function addSurface(){
+  const off=((surfaces.length*0.025)%0.16);
+  createSurface(off);render();
+}
+addSurfaceBtn.addEventListener('click',addSurface);addSurfaceBtn2.addEventListener('click',addSurface);
+
+deleteSurfaceBtn.addEventListener('click',()=>{
+  if(surfaces.length<=1){status.textContent='Vähintään yksi pinta pitää olla olemassa.';return;}
+  const idx=surfaces.findIndex(s=>s.id===selectedSurfaceId),removed=surfaces.splice(idx,1)[0];
+  if(removed.objectUrl)URL.revokeObjectURL(removed.objectUrl);
+  for(const s of surfaces)if(s.shareFrom===removed.id)s.shareFrom=null;
+  for(const id of removed.nodeIds)if(!surfaces.some(s=>s.nodeIds.includes(id)))nodes.delete(id);
+  selectedSurfaceId=surfaces[Math.max(0,idx-1)].id;selectedCorner=0;render();
+});
+
+detachCornerBtn.addEventListener('click',()=>{
+  const s=activeSurface();if(!s||s.locked)return;
+  const old=cornerNode(s,selectedCorner);
+  const shared=surfaces.reduce((n,sf)=>n+sf.nodeIds.filter(id=>id===old.id).length,0);
+  if(shared<=1){status.textContent='Valittu kulma ei ole yhteinen muiden pintojen kanssa.';return;}
+  s.nodeIds[selectedCorner]=makeNode(old.x,old.y);status.textContent='Valittu kulma irrotettiin yhteisestä pisteestä.';render();
+});
+
+contentMode.addEventListener('change',()=>{
+  const s=activeSurface();if(!s)return;
+  s.shareFrom=contentMode.value==='own'?null:(Number(contentMode.value.split(':')[1])||null);
+  render();
+});
+
+fileInput.addEventListener('change',()=>{
+  const s=activeSurface(),file=fileInput.files&&fileInput.files[0];if(!s||!file)return;
+  s.shareFrom=null;
+  if(s.objectUrl){URL.revokeObjectURL(s.objectUrl);s.objectUrl=null;}
+  if(s.video){try{s.video.pause()}catch(_){}s.video=null;}
+
+  if(file.type.startsWith('video/')){
+    const url=URL.createObjectURL(file),v=document.createElement('video');
+    v.src=url;v.muted=true;v.loop=true;v.playsInline=true;v.preload='auto';
+    s.objectUrl=url;s.video=v;s.contentType='video';s.fileName=file.name;
+    v.addEventListener('loadeddata',()=>{
+      s.sourceAspect=(v.videoWidth&&v.videoHeight)?(v.videoWidth/v.videoHeight):1;
+      gl.bindTexture(gl.TEXTURE_2D,s.texture);
+      try{gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,v)}catch(_){}
+      v.play().catch(()=>{});status.textContent=`${s.name}: video ${file.name} ladattu.`;render();
+    });
+    v.load();
+  }else if(file.type.startsWith('image/')){
+    const img=new Image(),reader=new FileReader();
+    reader.onload=()=>{img.onload=()=>{
+      s.sourceAspect=(img.width&&img.height)?(img.width/img.height):1;
+      gl.bindTexture(gl.TEXTURE_2D,s.texture);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img);
+      s.contentType='image';s.video=null;s.fileName=file.name;status.textContent=`${s.name}: kuva ${file.name} ladattu.`;render();
+    };img.src=reader.result;};
+    reader.readAsDataURL(file);
+  }
+  fileInput.value='';render();
+});
+
+playPauseBtn.addEventListener('click',()=>{
+  const src=resolveContentSurface(activeSurface());
+  if(!src||src.contentType!=='video'||!src.video)return;
+  if(src.video.paused)src.video.play().catch(()=>{});else src.video.pause();render();
+});
+restartBtn.addEventListener('click',()=>{
+  const src=resolveContentSurface(activeSurface());
+  if(!src||src.contentType!=='video'||!src.video)return;
+  src.video.currentTime=0;src.video.play().catch(()=>{});render();
+});
+
+surfaceVisible.addEventListener('change',()=>{const s=activeSurface();if(s){s.visible=surfaceVisible.checked;render();}});
+surfaceLocked.addEventListener('change',()=>{const s=activeSurface();if(s){s.locked=surfaceLocked.checked;render();}});
+opacity.addEventListener('input',()=>{const s=activeSurface();if(s){s.opacity=Number(opacity.value)/100;render();}});
+fitMode.addEventListener('change',()=>{const s=activeSurface();if(s){s.fitMode=fitMode.value;render();}});
+zoom.addEventListener('input',()=>{const s=activeSurface();if(s){s.zoom=Number(zoom.value)/100;zoomValue.textContent=zoom.value+' %';render();}});
+showGrid.addEventListener('change',render);showAllHandles.addEventListener('change',render);gridSize.addEventListener('change',render);
+
+document.querySelectorAll('[data-dx]').forEach(btn=>btn.addEventListener('click',()=>{
+  const s=activeSurface();if(!s||s.locked)return;
+  const n=cornerNode(s,selectedCorner);
+  const px=Number(btn.dataset.dx),py=Number(btn.dataset.dy);
+  moveNode(n.id,n.x+px/window.innerWidth,n.y+py/window.innerHeight);render();
+}));
+
+projectionBtn.addEventListener('click',()=>{
+  document.body.classList.toggle('projection-only');
+  projectionBtn.textContent=document.body.classList.contains('projection-only')?'Poistu projisointitilasta':'Projisointitila';
+  render();
+});
+fullscreenBtn.addEventListener('click',async()=>{
+  try{
+    if(!document.fullscreenElement)await document.documentElement.requestFullscreen();
+    else await document.exitFullscreen();
+  }catch(_){status.textContent='Koko näytön tila ei onnistunut tässä selaimessa.';}
+});
+resetViewBtn.addEventListener('click',()=>{
+  surfaces.forEach((s,idx)=>{
+    const off=(idx%3)*0.04;
+    const coords=[[.08+off,.08+off],[.50+off,.08+off],[.50+off,.50+off],[.08+off,.50+off]];
+    for(let i=0;i<4;i++){
+      const oldId=s.nodeIds[i];s.nodeIds[i]=makeNode(coords[i][0],coords[i][1]);
+      if(!surfaces.some(sf=>sf.nodeIds.includes(oldId)))nodes.delete(oldId);
+    }
+  });render();
+});
+
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&document.body.classList.contains('projection-only')){
+    document.body.classList.remove('projection-only');projectionBtn.textContent='Projisointitila';render();return;
+  }
+  const tag=document.activeElement&&document.activeElement.tagName;
+  if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA')return;
+  const s=activeSurface();if(!s||s.locked)return;
+  const step=e.shiftKey?10:1;
+  let dx=0,dy=0;
+  if(e.key==='ArrowLeft')dx=-step;
+  else if(e.key==='ArrowRight')dx=step;
+  else if(e.key==='ArrowUp')dy=-step;
+  else if(e.key==='ArrowDown')dy=step;
+  else return;
+  e.preventDefault();
+  const n=cornerNode(s,selectedCorner);
+  moveNode(n.id,n.x+dx/window.innerWidth,n.y+dy/window.innerHeight);render();
+});
+
+function loop(){
+  let anyVideo=false;
+  for(const s of surfaces){
+    const src=resolveContentSurface(s);
+    if(src&&src.contentType==='video'&&src.video&&!src.video.paused){anyVideo=true;break;}
+  }
+  if(anyVideo){renderGL();if(!document.body.classList.contains('projection-only'))renderOverlay();}
+  requestAnimationFrame(loop);
+}
+
+resizeCanvases();
+createSurface(0);
+render();
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
