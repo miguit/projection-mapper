@@ -128,7 +128,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
   <div class="row">
     <label for="contentMode">Sisältö</label>
     <select id="contentMode"></select>
-    <small>Oma kuva/video tai sama sisältö kuin toisella pinnalla.</small>
+    <small>Oma kuva/video, testikuva kalibrointiin tai sama sisältö kuin toisella pinnalla.</small>
   </div>
 
   <div class="row" id="ownContentRow">
@@ -269,9 +269,44 @@ uniform float u_sourceAspect;
 uniform float u_surfaceAspect;
 uniform float u_fitMode;
 uniform float u_zoom;
+uniform float u_pattern;
 varying vec2 v_texCoord;
 
+// Testikuvat: 1 ruudukko, 2 shakkiruudukko, 3 väripalkit, 4 valkoinen.
+vec3 testPattern(vec2 uv){
+  if(u_pattern < 1.5){
+    vec2 cell=abs(fract(uv*8.0+0.5)-0.5);          // etäisyys lähimpään 1/8-viivaan
+    float line=step(min(cell.x,cell.y),0.035);
+    float border=step(min(min(uv.x,1.0-uv.x),min(uv.y,1.0-uv.y)),0.008);
+    vec2 c=(uv-0.5)*vec2(u_surfaceAspect,1.0);    // kuvasuhdekorjattu: ympyrä näkyy ympyränä
+    float ring=step(abs(length(c)-0.4),0.004);
+    float cr=step(min(abs(c.x),abs(c.y)),0.003);
+    vec3 col=vec3(line*0.55);
+    col=max(col,vec3(ring+cr));
+    return mix(col,vec3(1.0,0.25,0.2),border);
+  }
+  if(u_pattern < 2.5){
+    vec2 q=floor(uv*8.0);
+    return vec3(mod(q.x+q.y,2.0));
+  }
+  if(u_pattern < 3.5){
+    float i=floor(uv.x*8.0);
+    vec3 bars[8];
+    bars[0]=vec3(1.0);bars[1]=vec3(1.0,1.0,0.0);bars[2]=vec3(0.0,1.0,1.0);bars[3]=vec3(0.0,1.0,0.0);
+    bars[4]=vec3(1.0,0.0,1.0);bars[5]=vec3(1.0,0.0,0.0);bars[6]=vec3(0.0,0.0,1.0);bars[7]=vec3(0.0);
+    vec3 col=vec3(0.0);
+    for(int k=0;k<8;k++){if(float(k)==i)col=bars[k];}
+    if(uv.y>0.75)col=vec3(floor(uv.x*8.0)/7.0); // harmaasävyporras alareunaan
+    return col;
+  }
+  return vec3(1.0);
+}
+
 void main(){
+  if(u_pattern > 0.5){
+    gl_FragColor=vec4(testPattern(v_texCoord)*u_opacity,1.0);
+    return;
+  }
   if(u_hasImage < 0.5){
     gl_FragColor=vec4(1.0*u_opacity,1.0*u_opacity,1.0*u_opacity,1.0);
     return;
@@ -328,6 +363,8 @@ const sourceAspectLoc=gl.getUniformLocation(program,'u_sourceAspect');
 const surfaceAspectLoc=gl.getUniformLocation(program,'u_surfaceAspect');
 const fitModeLoc=gl.getUniformLocation(program,'u_fitMode');
 const zoomLoc=gl.getUniformLocation(program,'u_zoom');
+const patternLoc=gl.getUniformLocation(program,'u_pattern');
+const PATTERNS={grid:{name:'ruudukko',id:1},checker:{name:'shakkiruudukko',id:2},bars:{name:'väripalkit',id:3},white:{name:'valkoinen',id:4}};
 const posBuffer=gl.createBuffer(),texBuffer=gl.createBuffer();
 
 const cornerNames=['Vasen ylä','Oikea ylä','Oikea ala','Vasen ala'];
@@ -367,7 +404,7 @@ function createSurface(offset=0){
     nodeIds:[makeNode(ox,oy),makeNode(ox+.42,oy),makeNode(ox+.42,oy+.42),makeNode(ox,oy+.42)],
     texture:makeTexture(),contentType:'none',video:null,objectUrl:null,fileName:'',
     shareFrom:null,opacity:1,visible:true,locked:false,
-    fitMode:'fit',zoom:1,sourceAspect:1,hasMedia:false
+    fitMode:'fit',zoom:1,sourceAspect:1,hasMedia:false,pattern:null
   };
   s.name='Pinta '+s.id;surfaces.push(s);selectedSurfaceId=s.id;selectedCorner=0;return s;
 }
@@ -387,7 +424,7 @@ function resolveContentSurface(s,seen=new Set()){
 }
 function isVideoSurface(s){
   const src=resolveContentSurface(s);
-  return src&&src.contentType==='video'&&src.video;
+  return src&&!src.pattern&&src.contentType==='video'&&src.video;
 }
 
 function pxPoint(n){return{x:n.x*glCanvas.width,y:n.y*glCanvas.height};}
@@ -462,6 +499,7 @@ function renderSurfaceGL(s){
   gl.uniform1i(imgLoc,0);
   gl.uniform1f(opLoc,s.opacity);
   gl.uniform1f(hasImgLoc,src&&src.contentType!=='none'?1:0);
+  gl.uniform1f(patternLoc,src&&src.pattern&&PATTERNS[src.pattern]?PATTERNS[src.pattern].id:0);
 
   const srcAspect=(src&&src.sourceAspect)?src.sourceAspect:1;
   const surfAspect=surfaceAspectFromPoints(pts);
@@ -529,11 +567,14 @@ function rebuildContentMode(){
   const s=activeSurface();if(!s)return;
   contentMode.innerHTML='';
   const own=document.createElement('option');own.value='own';own.textContent='Oma sisältö';contentMode.appendChild(own);
+  for(const [key,p] of Object.entries(PATTERNS)){
+    const opt=document.createElement('option');opt.value='pattern:'+key;opt.textContent='Testikuva: '+p.name;contentMode.appendChild(opt);
+  }
   for(const other of surfaces){
     if(other.id===s.id)continue;
     const opt=document.createElement('option');opt.value='share:'+other.id;opt.textContent='Sama sisältö kuin '+other.name;contentMode.appendChild(opt);
   }
-  contentMode.value=s.shareFrom?('share:'+s.shareFrom):'own';
+  contentMode.value=s.shareFrom?('share:'+s.shareFrom):(s.pattern?('pattern:'+s.pattern):'own');
 }
 function renderSurfaceList(){
   surfaceList.innerHTML='';
@@ -558,7 +599,7 @@ function syncPanel(){
   zoomValue.textContent=Math.round((s.zoom||1)*100)+' %';
   selectedCornerLabel.textContent=cornerNames[selectedCorner];
   rebuildContentMode();
-  ownContentRow.style.display=s.shareFrom?'none':'block';
+  ownContentRow.style.display=(s.shareFrom||s.pattern)?'none':'block';
   const src=resolveContentSurface(s);
   fileName.textContent=s.shareFrom?('Jaettu sisältö: '+(src?src.name:'-')):(s.fileName||'Ei sisältöä valittuna.');
   const videoActive=isVideoSurface(s);
@@ -657,7 +698,9 @@ detachCornerBtn.addEventListener('click',()=>{
 
 contentMode.addEventListener('change',()=>{
   const s=activeSurface();if(!s)return;
-  s.shareFrom=contentMode.value==='own'?null:(Number(contentMode.value.split(':')[1])||null);
+  const [kind,arg]=contentMode.value.split(':');
+  s.shareFrom=kind==='share'?(Number(arg)||null):null;
+  s.pattern=kind==='pattern'&&PATTERNS[arg]?arg:null;
   render();
 });
 
@@ -696,7 +739,7 @@ function loadMedia(s,blob,name){
 
 fileInput.addEventListener('change',()=>{
   const s=activeSurface(),file=fileInput.files&&fileInput.files[0];if(!s||!file)return;
-  s.shareFrom=null;
+  s.shareFrom=null;s.pattern=null;
   if(loadMedia(s,file,file.name)){
     s.hasMedia=true;
     mediaPut(s.id,file).catch(()=>{status.textContent='Tiedostoa ei voitu tallentaa selaimeen (tila täynnä?). Se toimii, kunnes sivu ladataan uudelleen.';});
@@ -830,7 +873,7 @@ function serializeState(){
     surfaces:surfaces.map(s=>({
       id:s.id,name:s.name,nodeIds:s.nodeIds,shareFrom:s.shareFrom,
       opacity:s.opacity,visible:s.visible,locked:s.locked,
-      fitMode:s.fitMode,zoom:s.zoom,hasMedia:s.hasMedia,fileName:s.fileName
+      fitMode:s.fitMode,zoom:s.zoom,hasMedia:s.hasMedia,fileName:s.fileName,pattern:s.pattern
     })),
     ui:{showGrid:showGrid.checked,showAllHandles:showAllHandles.checked,gridSize:gridSize.value}
   };
@@ -853,7 +896,8 @@ function restoreState(){
       id:d.id,name:d.name||('Pinta '+d.id),nodeIds:d.nodeIds.slice(),
       texture:makeTexture(),contentType:'none',video:null,objectUrl:null,fileName:d.fileName||'',
       shareFrom:d.shareFrom||null,opacity:d.opacity??1,visible:d.visible!==false,locked:!!d.locked,
-      fitMode:d.fitMode||'fit',zoom:d.zoom||1,sourceAspect:1,hasMedia:!!d.hasMedia
+      fitMode:d.fitMode||'fit',zoom:d.zoom||1,sourceAspect:1,hasMedia:!!d.hasMedia,
+      pattern:PATTERNS[d.pattern]?d.pattern:null
     });
   }
   if(!surfaces.length){nodes.clear();return false;}
