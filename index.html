@@ -189,7 +189,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
     <label for="shapeKind">Muoto</label>
     <select id="shapeKind">
       <option value="quad">Nelikulmio</option>
-      <option value="poly">Monikulmio (8 pistettä)</option>
+      <option value="poly">Monikulmio</option>
       <option value="ellipse">Ympyrä / ellipsi</option>
     </select>
     <div id="radiusRow" style="margin-top:10px">
@@ -200,7 +200,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
       <button id="editFrameBtn">Muokkaa kehystä</button>
       <button id="editShapeBtn">Muokkaa muotoa</button>
     </div>
-    <small>Kehyksen kulmat 1–4 määräävät perspektiivin. Muotopisteet rajaavat kehyksen sisältä, mikä osa valaistaan. M vaihtaa tilaa.</small>
+    <small>Kehyksen kulmat 1–4 määräävät perspektiivin. Muotopisteet rajaavat kehyksen sisältä, mikä osa valaistaan. M vaihtaa tilaa. Muototilassa tuplaklikkaus reunalla lisää pisteen, Delete poistaa valitun.</small>
   </div>
 
   <div class="row">
@@ -878,6 +878,51 @@ function hitShapePoint(p){
   });
   return best;
 }
+// Lähin muodon reunaviiva (ohjauspisteiden välinen jana) näytöllä, jos riittävän lähellä.
+function hitShapeEdge(p){
+  const s=activeSurface();if(!s||!s.visible||!isShapeEditing())return null;
+  const px={x:p.x*glCanvas.width,y:p.y*glCanvas.height},lim=12*(window.devicePixelRatio||1);
+  const q=s.mask.points.map(pt=>uvToPx(s,pt));
+  let best=null,bestD=lim;
+  for(let i=0;i<q.length;i++){
+    const a=q[i],b=q[(i+1)%q.length],vx=b.x-a.x,vy=b.y-a.y,len2=vx*vx+vy*vy||1;
+    const t=Math.max(0,Math.min(1,((px.x-a.x)*vx+(px.y-a.y)*vy)/len2));
+    const d=Math.hypot(a.x+vx*t-px.x,a.y+vy*t-px.y);
+    if(d<bestD){bestD=d;best={s,index:i};}
+  }
+  return best;
+}
+function insertShapePoint(s,afterIndex,p){
+  if(s.locked){status.textContent='Pinta on lukittu.';return;}
+  s.mask.points.splice(afterIndex+1,0,screenToUV(s,p));
+  selectedCorner=SHAPE_BASE+afterIndex+1;
+  status.textContent=`Muotopiste lisätty (${s.mask.points.length} pistettä).`;
+}
+function removeShapePoint(s,index){
+  if(s.locked){status.textContent='Pinta on lukittu.';return;}
+  if(s.mask.points.length<=3){status.textContent='Monikulmiossa pitää olla vähintään 3 pistettä.';return;}
+  s.mask.points.splice(index,1);
+  selectedCorner=SHAPE_BASE+Math.max(0,index-1);
+  status.textContent=`Muotopiste poistettu (${s.mask.points.length} pistettä).`;
+}
+function showShapeMenu(clientX,clientY,p){
+  const sp=hitShapePoint(p);
+  if(sp){
+    selectedCorner=SHAPE_BASE+sp.index;render();
+    openMenu(clientX,clientY,`${sp.s.name} · muotopiste ${sp.index+1}`,item=>{
+      item('Poista piste',()=>{removeShapePoint(sp.s,sp.index);render();},sp.s.locked||sp.s.mask.points.length<=3);
+    });
+    return true;
+  }
+  const edge=hitShapeEdge(p);
+  if(edge){
+    openMenu(clientX,clientY,`${edge.s.name} · muodon reuna`,item=>{
+      item('Lisää piste tähän',()=>{insertShapePoint(edge.s,edge.index,p);render();},edge.s.locked);
+    });
+    return true;
+  }
+  return false;
+}
 function hitCorner(p){
   const hitX=30/window.innerWidth,hitY=30/window.innerHeight;
   let best=null,bestD=Infinity;
@@ -928,6 +973,7 @@ function showPointMenu(clientX,clientY,hit){
 overlayCanvas.addEventListener('contextmenu',e=>{
   e.preventDefault();
   if(isProjectionMode())return;
+  if(showShapeMenu(e.clientX,e.clientY,pointerPos(e)))return;
   const hit=hitCorner(pointerPos(e));
   if(!hit){hidePointMenu();return;}
   selectedSurfaceId=hit.s.id;selectedCorner=hit.corner;render();
@@ -948,7 +994,17 @@ overlayCanvas.addEventListener('pointerdown',e=>{
   const sp=hitShapePoint(p);
   if(sp){
     selectedCorner=SHAPE_BASE+sp.index;
-    if(!sp.s.locked){dragging={surfaceId:sp.s.id,corner:selectedCorner};overlayCanvas.setPointerCapture(e.pointerId);}
+    if(!sp.s.locked){
+      const pt=sp.s.mask.points[sp.index],orig={u:pt.u,v:pt.v};
+      dragging={surfaceId:sp.s.id,corner:selectedCorner};overlayCanvas.setPointerCapture(e.pointerId);
+      if(e.pointerType==='touch'){
+        const start={x:e.clientX,y:e.clientY};
+        longPress={start,timer:setTimeout(()=>{
+          Object.assign(pt,orig);dragging=null;longPress=null;render();
+          showShapeMenu(start.x,start.y,p);
+        },600)};
+      }
+    }
     render();return;
   }
   let best=hitCorner(p),bestD=Infinity;
@@ -1147,7 +1203,13 @@ function setProjectionMode(on){
 }
 projectionBtn.addEventListener('click',()=>setProjectionMode(!isProjectionMode()));
 // Kosketuslaitteilla ei ole Esc-näppäintä: tuplanapautus palaa muokkaukseen.
-overlayCanvas.addEventListener('dblclick',()=>{if(isProjectionMode())setProjectionMode(false);});
+overlayCanvas.addEventListener('dblclick',e=>{
+  if(isProjectionMode()){setProjectionMode(false);return;}
+  const p=pointerPos(e);
+  if(hitShapePoint(p))return;
+  const edge=hitShapeEdge(p);
+  if(edge){insertShapePoint(edge.s,edge.index,p);render();}
+});
 // Selain vapauttaa wake lockin, kun välilehti piilotetaan; pyydetään uudelleen palatessa.
 document.addEventListener('visibilitychange',()=>{
   if(document.visibilityState==='visible'&&isProjectionMode())requestWakeLock();
@@ -1179,6 +1241,9 @@ document.addEventListener('keydown',e=>{
     return;
   }
   const s=activeSurface();if(!s||s.locked)return;
+  if((e.key==='Delete'||e.key==='Backspace')&&selectedCorner>=SHAPE_BASE&&isShapeEditing()){
+    e.preventDefault();removeShapePoint(s,selectedCorner-SHAPE_BASE);render();return;
+  }
   const step=e.shiftKey?10:1;
   let dx=0,dy=0;
   if(e.key==='ArrowLeft')dx=-step;
