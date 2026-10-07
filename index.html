@@ -202,7 +202,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
       <button id="editFrameBtn">Muokkaa kehystä</button>
       <button id="editShapeBtn">Muokkaa muotoa</button>
     </div>
-    <small>Kehyksen kulmat 1–4 määräävät perspektiivin. Muotopisteet rajaavat kehyksen sisältä, mikä osa valaistaan. M vaihtaa tilaa. Muototilassa tuplaklikkaus reunalla lisää pisteen, Delete poistaa valitun.</small>
+    <small>Kehyksen kulmat 1–4 määräävät perspektiivin. Muotopisteet rajaavat kehyksen sisältä, mikä osa valaistaan. E vaihtaa tilaa. Muototilassa tuplaklikkaus reunalla lisää pisteen, Delete poistaa valitun.</small>
   </div>
 
   <div class="row">
@@ -237,6 +237,13 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
   <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">
     <button id="detachCornerBtn">Irrota valittu kulma</button>
     <button id="deleteSurfaceBtn" class="danger">Poista pinta</button>
+  </div>
+
+  <div class="row">
+    <small>
+      <strong>Pikanäppäimet:</strong> R uusi nelikulmio · C uusi ympyrä · M uusi monikulmio ·
+      E kehys/muoto · Delete poistaa pinnan (tai valitun muotopisteen) · nuolet siirtävät (Shift = 10 px) · Esc poistuu projisointitilasta
+    </small>
   </div>
 
   <div class="row">
@@ -536,6 +543,7 @@ function radiusTarget(s){
   return 'all';
 }
 const SHAPE_NAMES={quad:'Nelikulmio',poly:'Monikulmio (8 pistettä)',ellipse:'Ympyrä / ellipsi'};
+const SHAPE_KEYS={r:'quad',c:'ellipse',m:'poly'}; // pikanäppäimet uusille pinnoille
 function shapeOutlineUV(s,aspect){
   if(s.mask.kind==='ellipse'){
     // Ellipsi sivuaa kehystä; perspektiivi tekee siitä seinällä oikean muotoisen.
@@ -1087,12 +1095,12 @@ function addSurface(kind){
 function openAddMenu(e){
   const r=e.currentTarget.getBoundingClientRect();
   openMenu(r.left,r.bottom+6,'Lisää pinta',item=>{
-    for(const kind of Object.keys(SHAPE_NAMES))item(SHAPE_NAMES[kind],()=>addSurface(kind));
+    for(const [key,kind] of Object.entries(SHAPE_KEYS))item(`${SHAPE_NAMES[kind]}  (${key.toUpperCase()})`,()=>addSurface(kind));
   });
 }
 addSurfaceBtn.addEventListener('click',openAddMenu);addSurfaceBtn2.addEventListener('click',openAddMenu);
 
-deleteSurfaceBtn.addEventListener('click',()=>{
+function deleteActiveSurface(){
   if(surfaces.length<=1){status.textContent='Vähintään yksi pinta pitää olla olemassa.';return;}
   const idx=surfaces.findIndex(s=>s.id===selectedSurfaceId),removed=surfaces.splice(idx,1)[0];
   if(removed.objectUrl)URL.revokeObjectURL(removed.objectUrl);
@@ -1100,8 +1108,10 @@ deleteSurfaceBtn.addEventListener('click',()=>{
   mediaDelete(removed.id).catch(()=>{});
   for(const s of surfaces)if(s.shareFrom===removed.id)s.shareFrom=null;
   for(const id of removed.nodeIds)if(!surfaces.some(s=>s.nodeIds.includes(id)))nodes.delete(id);
-  selectedSurfaceId=surfaces[Math.max(0,idx-1)].id;selectedCorner=0;render();
-});
+  selectedSurfaceId=surfaces[Math.max(0,idx-1)].id;selectedCorner=0;
+  status.textContent=`${removed.name} poistettu.`;render();
+}
+deleteSurfaceBtn.addEventListener('click',deleteActiveSurface);
 
 detachCornerBtn.addEventListener('click',()=>{
   const s=activeSurface();if(!s||s.locked)return;
@@ -1115,7 +1125,7 @@ detachCornerBtn.addEventListener('click',()=>{
 function setEditMode(mode){
   editMode=mode;
   selectedCorner=mode==='shape'?SHAPE_BASE:0;
-  status.textContent=mode==='shape'?'Muototila: vedä keltaisia muotopisteitä. M palaa kehykseen.':'Kehystila: vedä kulmia 1–4.';
+  status.textContent=mode==='shape'?'Muototila: vedä keltaisia muotopisteitä. E palaa kehykseen.':'Kehystila: vedä kulmia 1–4.';
   render();
 }
 editFrameBtn.addEventListener('click',()=>setEditMode('frame'));
@@ -1272,15 +1282,26 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Escape'&&isProjectionMode()){setProjectionMode(false);return;}
   const tag=document.activeElement&&document.activeElement.tagName;
   if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA')return;
-  if((e.key==='m'||e.key==='M')&&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+  if(isProjectionMode())return;
+  const plain=!e.ctrlKey&&!e.metaKey&&!e.altKey; // ei kaapata selaimen pikanäppäimiä (esim. Ctrl+R)
+  const key=e.key.toLowerCase();
+  if(plain&&SHAPE_KEYS[key]){e.preventDefault();hidePointMenu();addSurface(SHAPE_KEYS[key]);return;}
+  if(plain&&key==='e'){
     const a=activeSurface();
     if(a&&a.mask.kind==='poly')setEditMode(isShapeEditing()?'frame':'shape');
+    else status.textContent='Muototila on käytössä vain monikulmiossa.';
     return;
   }
-  const s=activeSurface();if(!s||s.locked)return;
-  if((e.key==='Delete'||e.key==='Backspace')&&selectedCorner>=SHAPE_BASE&&isShapeEditing()){
-    e.preventDefault();removeShapePoint(s,selectedCorner-SHAPE_BASE);render();return;
+  const s=activeSurface();if(!s)return;
+  if(e.key==='Delete'||(e.key==='Backspace'&&selectedCorner>=SHAPE_BASE)){
+    e.preventDefault();
+    if(s.locked){status.textContent='Pinta on lukittu.';return;}
+    if(selectedCorner>=SHAPE_BASE&&isShapeEditing()){removeShapePoint(s,selectedCorner-SHAPE_BASE);render();return;}
+    if(surfaces.length>1&&confirm(`Poistetaanko ${s.name}?`))deleteActiveSurface();
+    else if(surfaces.length<=1)status.textContent='Vähintään yksi pinta pitää olla olemassa.';
+    return;
   }
+  if(s.locked)return;
   const step=e.shiftKey?10:1;
   let dx=0,dy=0;
   if(e.key==='ArrowLeft')dx=-step;
