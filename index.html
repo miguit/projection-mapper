@@ -90,6 +90,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
 .badge{display:inline-block;padding:3px 7px;border-radius:999px;background:var(--panel3);color:var(--muted);font-size:12px}
 .controls{display:flex;gap:8px;flex-wrap:wrap}
 .controls button{padding:8px 10px;font-size:13px}
+.controls button.on{border-color:var(--accent);background:var(--panel3);color:var(--text)}
 #pointMenu{
   position:absolute;z-index:30;display:none;min-width:220px;
   background:var(--panel);backdrop-filter:blur(8px);
@@ -185,6 +186,19 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
   </div>
 
   <div class="row">
+    <label for="shapeKind">Muoto</label>
+    <select id="shapeKind">
+      <option value="quad">Nelikulmio</option>
+      <option value="poly">Monikulmio (8 pistettä)</option>
+    </select>
+    <div class="controls" id="editModeRow" style="margin-top:8px">
+      <button id="editFrameBtn">Muokkaa kehystä</button>
+      <button id="editShapeBtn">Muokkaa muotoa</button>
+    </div>
+    <small>Kehyksen kulmat 1–4 määräävät perspektiivin. Muotopisteet rajaavat kehyksen sisältä, mikä osa valaistaan. M vaihtaa tilaa.</small>
+  </div>
+
+  <div class="row">
     <label class="check"><input id="showGrid" type="checkbox" checked> Näytä aktiivisen pinnan ruudukko</label>
     <label class="check"><input id="showAllHandles" type="checkbox" checked> Näytä muiden pintojen kulmapisteet</label>
   </div>
@@ -271,6 +285,10 @@ const restartBtn=document.getElementById('restartBtn');
 const videoInfo=document.getElementById('videoInfo');
 const clearSavedBtn=document.getElementById('clearSavedBtn');
 const pointMenu=document.getElementById('pointMenu');
+const shapeKind=document.getElementById('shapeKind');
+const editModeRow=document.getElementById('editModeRow');
+const editFrameBtn=document.getElementById('editFrameBtn');
+const editShapeBtn=document.getElementById('editShapeBtn');
 
 if(!gl){status.textContent='WebGL ei ole käytettävissä tässä selaimessa.';return;}
 
@@ -284,6 +302,8 @@ uniform float u_surfaceAspect;
 uniform float u_fitMode;
 uniform float u_zoom;
 uniform float u_pattern;
+uniform sampler2D u_mask;
+uniform float u_hasMask;
 varying vec2 v_texCoord;
 
 // Testikuvat: 1 ruudukko, 2 shakkiruudukko, 3 väripalkit, 4 valkoinen.
@@ -316,15 +336,9 @@ vec3 testPattern(vec2 uv){
   return vec3(1.0);
 }
 
-void main(){
-  if(u_pattern > 0.5){
-    gl_FragColor=vec4(testPattern(v_texCoord)*u_opacity,1.0);
-    return;
-  }
-  if(u_hasImage < 0.5){
-    gl_FragColor=vec4(1.0*u_opacity,1.0*u_opacity,1.0*u_opacity,1.0);
-    return;
-  }
+vec3 contentColor(){
+  if(u_pattern > 0.5)return testPattern(v_texCoord);
+  if(u_hasImage < 0.5)return vec3(1.0);
 
   vec2 scale=vec2(1.0);
 
@@ -354,8 +368,16 @@ void main(){
 
   uv=clamp(uv,0.0,1.0);
   vec4 c=texture2D(u_image,uv);
-  vec3 rgb=c.rgb*c.a;
-  gl_FragColor=vec4(rgb*u_opacity,1.0);
+  return c.rgb*c.a;
+}
+
+void main(){
+  float m=1.0;
+  if(u_hasMask > 0.5){
+    m=texture2D(u_mask,v_texCoord).a;   // muodon peitto 0..1 (reunat antialiasoitu)
+    if(m < 0.004)discard;
+  }
+  gl_FragColor=vec4(contentColor()*u_opacity*m,1.0);
 }`;
 
 function compile(type,src){
@@ -378,14 +400,18 @@ const surfaceAspectLoc=gl.getUniformLocation(program,'u_surfaceAspect');
 const fitModeLoc=gl.getUniformLocation(program,'u_fitMode');
 const zoomLoc=gl.getUniformLocation(program,'u_zoom');
 const patternLoc=gl.getUniformLocation(program,'u_pattern');
+const maskLoc=gl.getUniformLocation(program,'u_mask');
+const hasMaskLoc=gl.getUniformLocation(program,'u_hasMask');
 const PATTERNS={grid:{name:'ruudukko',id:1},checker:{name:'shakkiruudukko',id:2},bars:{name:'väripalkit',id:3},white:{name:'valkoinen',id:4}};
 const posBuffer=gl.createBuffer(),texBuffer=gl.createBuffer();
 
 const cornerNames=['Vasen ylä','Oikea ylä','Oikea ala','Vasen ala','Koko pinta'];
 const CENTER=4; // selectedCorner-arvo, kun keskikahva (koko pinta) on valittuna
+const SHAPE_BASE=5; // selectedCorner >= SHAPE_BASE: muotopiste, indeksi = selectedCorner-SHAPE_BASE
 const SNAP_PX=18;
 
 let nextNodeId=1,nextSurfaceId=1,selectedSurfaceId=null,selectedCorner=0,dragging=null;
+let editMode='frame'; // 'frame' = kehyksen kulmat, 'shape' = muotopisteet
 const nodes=new Map(),surfaces=[];
 
 function resizeCanvases(){
@@ -419,7 +445,8 @@ function createSurface(offset=0){
     nodeIds:[makeNode(ox,oy),makeNode(ox+.42,oy),makeNode(ox+.42,oy+.42),makeNode(ox,oy+.42)],
     texture:makeTexture(),contentType:'none',video:null,objectUrl:null,fileName:'',
     shareFrom:null,opacity:1,visible:true,locked:false,
-    fitMode:'fit',zoom:1,sourceAspect:1,hasMedia:false,pattern:null
+    fitMode:'fit',zoom:1,sourceAspect:1,hasMedia:false,pattern:null,
+    mask:{kind:'quad',points:[],radius:0},maskTex:null,maskKey:''
   };
   s.name='Pinta '+s.id;surfaces.push(s);selectedSurfaceId=s.id;selectedCorner=0;return s;
 }
@@ -472,6 +499,58 @@ function surfaceAspectFromPoints(pts){
   return h>0.0001 ? w/h : 1.0;
 }
 
+// --- Muoto: pisteet pinnan omassa uv-koordinaatistossa (0..1 kehyksen sisällä) ---
+function defaultShapePoints(kind){
+  if(kind!=='poly')return [];
+  return [[0,0],[.5,0],[1,0],[1,.5],[1,1],[.5,1],[0,1],[0,.5]].map(([u,v])=>({u,v}));
+}
+const shapeUsesMask=s=>s.mask.kind!=='quad'||s.mask.radius>0;
+function shapeOutlineUV(s){
+  if(s.mask.kind==='poly')return s.mask.points.map(p=>({u:p.u,v:p.v}));
+  return [{u:0,v:0},{u:1,v:0},{u:1,v:1},{u:0,v:1}];
+}
+const maskCanvas=document.createElement('canvas'),mctx=maskCanvas.getContext('2d');
+const emptyMaskTex=makeTexture(); // sidotaan maskiyksikköön, kun pinnalla ei ole muotoa
+// Piirtää muodon maskitekstuuriin; uudelleen vain kun muoto tai kehyksen kuvasuhde muuttuu.
+function updateMaskTexture(s,aspect){
+  const a=Math.max(0.05,Math.min(20,aspect));
+  const key=JSON.stringify(s.mask)+'|'+a.toFixed(2);
+  if(s.maskTex&&s.maskKey===key)return;
+  const W=a>=1?1024:Math.max(16,Math.round(1024*a)),H=a>=1?Math.max(16,Math.round(1024/a)):1024;
+  maskCanvas.width=W;maskCanvas.height=H;
+  mctx.clearRect(0,0,W,H);mctx.fillStyle='#fff';mctx.beginPath();
+  shapeOutlineUV(s).forEach((p,i)=>i?mctx.lineTo(p.u*W,p.v*H):mctx.moveTo(p.u*W,p.v*H));
+  mctx.closePath();mctx.fill();
+  if(!s.maskTex)s.maskTex=makeTexture();
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,s.maskTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,maskCanvas);
+  s.maskKey=key;
+}
+function invertH(H){
+  const [a,b,c,d,e,f,g,h,i]=H;
+  const A=e*i-f*h,B=-(d*i-f*g),C=d*h-e*g;
+  const det=a*A+b*B+c*C||1e-12;
+  return [A/det,-(b*i-c*h)/det,(b*f-c*e)/det,B/det,(a*i-c*g)/det,-(a*f-c*d)/det,C/det,-(a*h-b*g)/det,(a*e-b*d)/det];
+}
+const surfaceH=s=>Hsq(...s.nodeIds.map(id=>pxPoint(nodes.get(id))));
+// Näytön normalisoitu piste (0..1) -> pinnan uv
+function screenToUV(s,p){
+  const q=applyH(invertH(surfaceH(s)),p.x*glCanvas.width,p.y*glCanvas.height);
+  return{u:Math.max(0,Math.min(1,q.x)),v:Math.max(0,Math.min(1,q.y))};
+}
+const uvToPx=(s,pt)=>applyH(surfaceH(s),pt.u,pt.v);
+const isShapeEditing=()=>{const s=activeSurface();return editMode==='shape'&&s&&s.mask.kind==='poly';};
+// Pitää valinnan järkevänä, kun tila tai pinta vaihtuu.
+function normalizeSelection(){
+  const s=activeSurface();if(!s)return;
+  if(isShapeEditing()){
+    const n=s.mask.points.length;
+    if(selectedCorner<SHAPE_BASE&&selectedCorner!==CENTER)selectedCorner=SHAPE_BASE;
+    if(selectedCorner>=SHAPE_BASE+n)selectedCorner=SHAPE_BASE+n-1;
+  }else if(selectedCorner>=SHAPE_BASE)selectedCorner=0;
+}
+
 function updateVideoTexture(src){
   if(!src||src.contentType!=='video'||!src.video)return;
   const v=src.video;
@@ -509,6 +588,10 @@ function renderSurfaceGL(s){
   gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(uvs),gl.DYNAMIC_DRAW);
   gl.enableVertexAttribArray(texLoc);gl.vertexAttribPointer(texLoc,2,gl.FLOAT,false,0,0);
 
+  const useMask=shapeUsesMask(s);
+  if(useMask)updateMaskTexture(s,surfaceAspectFromPoints(pts));
+  gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,useMask?s.maskTex:emptyMaskTex);
+  gl.uniform1i(maskLoc,1);gl.uniform1f(hasMaskLoc,useMask?1:0);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D,src?src.texture:s.texture);
   gl.uniform1i(imgLoc,0);
@@ -548,18 +631,40 @@ function drawGridForSurface(s){
 }
 function drawOutline(s){
   const active=s.id===selectedSurfaceId,pts=s.nodeIds.map(id=>pxPoint(nodes.get(id)));
+  const dpr=window.devicePixelRatio||1,masked=shapeUsesMask(s);
   octx.save();octx.beginPath();octx.moveTo(pts[0].x,pts[0].y);
   for(let i=1;i<4;i++)octx.lineTo(pts[i].x,pts[i].y);
   octx.closePath();
   octx.strokeStyle=active?'rgba(88,166,255,.95)':'rgba(255,255,255,.32)';
-  octx.lineWidth=(active?2.5:1.4)*(window.devicePixelRatio||1);
-  octx.stroke();octx.restore();
+  octx.lineWidth=(active?2.5:1.4)*dpr;
+  if(masked){octx.setLineDash([6*dpr,5*dpr]);octx.lineWidth=1.2*dpr;} // kehys katkoviivalla, muoto yhtenäisellä
+  octx.stroke();
+  if(masked){
+    const H=surfaceH(s);
+    octx.setLineDash([]);octx.beginPath();
+    shapeOutlineUV(s).forEach((p,i)=>{const q=applyH(H,p.u,p.v);i?octx.lineTo(q.x,q.y):octx.moveTo(q.x,q.y);});
+    octx.closePath();
+    octx.strokeStyle=active?'rgba(255,196,0,.95)':'rgba(255,255,255,.32)';
+    octx.lineWidth=(active?2.5:1.4)*dpr;octx.stroke();
+  }
+  octx.restore();
+}
+function drawShapeHandles(s){
+  if(s.id!==selectedSurfaceId||!isShapeEditing())return;
+  const dpr=window.devicePixelRatio||1;
+  s.mask.points.forEach((pt,i)=>{
+    const q=uvToPx(s,pt),sel=selectedCorner===SHAPE_BASE+i,r=(sel?10:7.5)*dpr;
+    octx.beginPath();octx.moveTo(q.x,q.y-r);octx.lineTo(q.x+r,q.y);octx.lineTo(q.x,q.y+r);octx.lineTo(q.x-r,q.y);octx.closePath();
+    octx.fillStyle=sel?'#ffc400':'#fff';octx.fill();
+    octx.lineWidth=2*dpr;octx.strokeStyle=sel?'#000':'rgba(0,0,0,.75)';octx.stroke();
+  });
 }
 function drawHandles(s){
   const active=s.id===selectedSurfaceId;
   if(!active&&!showAllHandles.checked)return;
   const dpr=window.devicePixelRatio||1;
   for(let i=0;i<4;i++){
+    if(active&&isShapeEditing())break; // muototilassa kehyksen kulmat piilotetaan, jotta ne eivät peitä muotopisteitä
     const p=pxPoint(cornerNode(s,i));
     octx.beginPath();
     octx.arc(p.x,p.y,(active&&i===selectedCorner?13:active?10:7)*dpr,0,Math.PI*2);
@@ -585,7 +690,7 @@ function drawHandles(s){
 function renderOverlay(){
   octx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);
   if(document.body.classList.contains('projection-only'))return;
-  surfaces.forEach(drawOutline);surfaces.forEach(drawGridForSurface);surfaces.forEach(drawHandles);
+  surfaces.forEach(drawOutline);surfaces.forEach(drawGridForSurface);surfaces.forEach(drawHandles);surfaces.forEach(drawShapeHandles);
 }
 
 function rebuildContentMode(){
@@ -622,7 +727,10 @@ function syncPanel(){
   fitMode.value=s.fitMode||'fit';
   zoom.value=Math.round((s.zoom||1)*100);
   zoomValue.textContent=Math.round((s.zoom||1)*100)+' %';
-  selectedCornerLabel.textContent=cornerNames[selectedCorner];
+  selectedCornerLabel.textContent=selectedCorner>=SHAPE_BASE?('Muotopiste '+(selectedCorner-SHAPE_BASE+1)):cornerNames[selectedCorner];
+  shapeKind.value=s.mask.kind;
+  editModeRow.style.display=s.mask.kind==='poly'?'flex':'none';
+  editFrameBtn.classList.toggle('on',!isShapeEditing());editShapeBtn.classList.toggle('on',isShapeEditing());
   rebuildContentMode();
   ownContentRow.style.display=(s.shareFrom||s.pattern)?'none':'block';
   const src=resolveContentSurface(s);
@@ -635,7 +743,7 @@ function syncPanel(){
   }
   renderSurfaceList();
 }
-function render(){resizeCanvases();renderGL();renderOverlay();syncPanel();scheduleSave();}
+function render(){normalizeSelection();resizeCanvases();renderGL();renderOverlay();syncPanel();scheduleSave();}
 
 function pointerPos(e){
   const r=overlayCanvas.getBoundingClientRect();
@@ -675,6 +783,11 @@ function nudgeSelection(pxX,pxY){
   const s=activeSurface();if(!s||s.locked)return;
   const dx=pxX/window.innerWidth,dy=pxY/window.innerHeight;
   if(selectedCorner===CENTER)moveSurface(s,dx,dy);
+  else if(selectedCorner>=SHAPE_BASE){
+    const pt=s.mask.points[selectedCorner-SHAPE_BASE];if(!pt)return;
+    const q=uvToPx(s,pt);
+    Object.assign(pt,screenToUV(s,{x:q.x/glCanvas.width+dx,y:q.y/glCanvas.height+dy}));
+  }
   else{const n=cornerNode(s,selectedCorner);moveNode(n.id,n.x+dx,n.y+dy);}
   render();
 }
@@ -708,10 +821,21 @@ function explodeNode(nodeId){
   toDetach.forEach(s=>detachCorner(s,s.nodeIds.indexOf(nodeId)));
   return toDetach.length;
 }
+function hitShapePoint(p){
+  const s=activeSurface();if(!s||!s.visible||!isShapeEditing())return null;
+  const hitX=24/window.innerWidth,hitY=24/window.innerHeight;
+  let best=null,bestD=Infinity;
+  s.mask.points.forEach((pt,i)=>{
+    const q=uvToPx(s,pt);
+    const dx=(q.x/glCanvas.width-p.x)/hitX,dy=(q.y/glCanvas.height-p.y)/hitY,d=dx*dx+dy*dy;
+    if(d<1&&d<bestD){bestD=d;best={s,index:i};}
+  });
+  return best;
+}
 function hitCorner(p){
   const hitX=30/window.innerWidth,hitY=30/window.innerHeight;
   let best=null,bestD=Infinity;
-  for(const s of surfaces){if(!s.visible)continue;for(let i=0;i<4;i++){
+  for(const s of surfaces){if(!s.visible||(s.id===selectedSurfaceId&&isShapeEditing()))continue;for(let i=0;i<4;i++){
     const n=cornerNode(s,i);
     const dx=(n.x-p.x)/hitX,dy=(n.y-p.y)/hitY,d=dx*dx+dy*dy;
     if(d<1&&d<bestD){bestD=d;best={s,corner:i,node:n};}
@@ -769,7 +893,14 @@ function cancelLongPress(){if(longPress){clearTimeout(longPress.timer);longPress
 overlayCanvas.addEventListener('pointerdown',e=>{
   if(document.body.classList.contains('projection-only'))return;
   if(e.button!==0)return; // oikea painike avaa valikon contextmenu-tapahtumassa
-  const p=pointerPos(e);let best=hitCorner(p),bestD=Infinity;
+  const p=pointerPos(e);
+  const sp=hitShapePoint(p);
+  if(sp){
+    selectedCorner=SHAPE_BASE+sp.index;
+    if(!sp.s.locked){dragging={surfaceId:sp.s.id,corner:selectedCorner};overlayCanvas.setPointerCapture(e.pointerId);}
+    render();return;
+  }
+  let best=hitCorner(p),bestD=Infinity;
   const hitX=30/window.innerWidth,hitY=30/window.innerHeight;
   if(!best){
     for(const s of surfaces){
@@ -800,6 +931,7 @@ overlayCanvas.addEventListener('pointermove',e=>{
   const s=getSurface(dragging.surfaceId);if(!s||s.locked)return;
   const p=pointerPos(e);
   if(dragging.corner===CENTER){moveSurface(s,p.x-dragging.last.x,p.y-dragging.last.y);dragging.last=p;}
+  else if(dragging.corner>=SHAPE_BASE){const pt=s.mask.points[dragging.corner-SHAPE_BASE];if(pt)Object.assign(pt,screenToUV(s,p));}
   else moveNode(s.nodeIds[dragging.corner],p.x,p.y);
   render();
 });
@@ -807,7 +939,7 @@ overlayCanvas.addEventListener('pointerup',e=>{
   cancelLongPress();
   if(dragging){
     const s=getSurface(dragging.surfaceId);
-    if(s&&!s.locked&&dragging.corner!==CENTER&&snapCornerIfNeeded(s,dragging.corner))status.textContent='Kulma napsahti yhteiseen pisteeseen.';
+    if(s&&!s.locked&&dragging.corner<CENTER&&snapCornerIfNeeded(s,dragging.corner))status.textContent='Kulma napsahti yhteiseen pisteeseen.';
   }
   dragging=null;try{overlayCanvas.releasePointerCapture(e.pointerId)}catch(_){}render();
 });
@@ -832,11 +964,28 @@ deleteSurfaceBtn.addEventListener('click',()=>{
 
 detachCornerBtn.addEventListener('click',()=>{
   const s=activeSurface();if(!s||s.locked)return;
-  if(selectedCorner===CENTER){status.textContent='Valitse ensin kulma (1–4), jonka haluat irrottaa.';return;}
+  if(selectedCorner>=CENTER){status.textContent='Valitse ensin kehyksen kulma (1–4), jonka haluat irrottaa.';return;}
   const old=cornerNode(s,selectedCorner);
   const shared=surfaces.reduce((n,sf)=>n+sf.nodeIds.filter(id=>id===old.id).length,0);
   if(shared<=1){status.textContent='Valittu kulma ei ole yhteinen muiden pintojen kanssa.';return;}
   detachCorner(s,selectedCorner);status.textContent='Valittu kulma irrotettiin yhteisestä pisteestä.';render();
+});
+
+function setEditMode(mode){
+  editMode=mode;
+  selectedCorner=mode==='shape'?SHAPE_BASE:0;
+  status.textContent=mode==='shape'?'Muototila: vedä keltaisia muotopisteitä. M palaa kehykseen.':'Kehystila: vedä kulmia 1–4.';
+  render();
+}
+editFrameBtn.addEventListener('click',()=>setEditMode('frame'));
+editShapeBtn.addEventListener('click',()=>setEditMode('shape'));
+shapeKind.addEventListener('change',()=>{
+  const s=activeSurface();if(!s)return;
+  const kind=shapeKind.value;
+  if(s.locked){status.textContent='Pinta on lukittu.';render();return;}
+  s.mask.kind=kind;
+  s.mask.points=kind==='poly'?(s.mask.points.length>=3?s.mask.points:defaultShapePoints('poly')):[];
+  setEditMode(kind==='poly'?'shape':'frame');
 });
 
 contentMode.addEventListener('change',()=>{
@@ -959,6 +1108,11 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Escape'&&isProjectionMode()){setProjectionMode(false);return;}
   const tag=document.activeElement&&document.activeElement.tagName;
   if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA')return;
+  if((e.key==='m'||e.key==='M')&&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+    const a=activeSurface();
+    if(a&&a.mask.kind==='poly')setEditMode(isShapeEditing()?'frame':'shape');
+    return;
+  }
   const s=activeSurface();if(!s||s.locked)return;
   const step=e.shiftKey?10:1;
   let dx=0,dy=0;
@@ -1007,12 +1161,13 @@ const mediaDelete=id=>mediaOp('readwrite',st=>st.delete(id));
 function serializeState(){
   const usedIds=new Set(surfaces.flatMap(s=>s.nodeIds));
   return{
-    nextNodeId,nextSurfaceId,selectedSurfaceId,selectedCorner,
+    nextNodeId,nextSurfaceId,selectedSurfaceId,selectedCorner,editMode,
     nodes:[...nodes.values()].filter(n=>usedIds.has(n.id)).map(n=>({id:n.id,x:n.x,y:n.y})),
     surfaces:surfaces.map(s=>({
       id:s.id,name:s.name,nodeIds:s.nodeIds,shareFrom:s.shareFrom,
       opacity:s.opacity,visible:s.visible,locked:s.locked,
-      fitMode:s.fitMode,zoom:s.zoom,hasMedia:s.hasMedia,fileName:s.fileName,pattern:s.pattern
+      fitMode:s.fitMode,zoom:s.zoom,hasMedia:s.hasMedia,fileName:s.fileName,pattern:s.pattern,
+      mask:s.mask
     })),
     ui:{showGrid:showGrid.checked,showAllHandles:showAllHandles.checked,gridSize:gridSize.value}
   };
@@ -1024,6 +1179,16 @@ function saveState(){
 function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(saveState,300);}
 window.addEventListener('pagehide',()=>{clearTimeout(saveTimer);saveState();});
 
+const MASK_KINDS=['quad','poly'];
+function restoreMask(m){
+  const out={kind:'quad',points:[],radius:0};
+  if(!m||!MASK_KINDS.includes(m.kind))return out;
+  const pts=Array.isArray(m.points)?m.points.filter(p=>p&&isFinite(p.u)&&isFinite(p.v)).map(p=>({u:+p.u,v:+p.v})):[];
+  if(m.kind==='poly'&&pts.length<3)return out;
+  out.kind=m.kind;out.points=m.kind==='poly'?pts:[];
+  out.radius=Math.max(0,Math.min(1,+m.radius||0));
+  return out;
+}
 function restoreState(){
   let data;
   try{data=JSON.parse(localStorage.getItem(STATE_KEY)||'null');}catch(_){return false;}
@@ -1036,14 +1201,16 @@ function restoreState(){
       texture:makeTexture(),contentType:'none',video:null,objectUrl:null,fileName:d.fileName||'',
       shareFrom:d.shareFrom||null,opacity:d.opacity??1,visible:d.visible!==false,locked:!!d.locked,
       fitMode:d.fitMode||'fit',zoom:d.zoom||1,sourceAspect:1,hasMedia:!!d.hasMedia,
-      pattern:PATTERNS[d.pattern]?d.pattern:null
+      pattern:PATTERNS[d.pattern]?d.pattern:null,
+      mask:restoreMask(d.mask),maskTex:null,maskKey:''
     });
   }
   if(!surfaces.length){nodes.clear();return false;}
   nextNodeId=Math.max(data.nextNodeId||1,...nodes.keys())+1;
   nextSurfaceId=Math.max(data.nextSurfaceId||1,...surfaces.map(s=>s.id))+1;
   selectedSurfaceId=getSurface(data.selectedSurfaceId)?data.selectedSurfaceId:surfaces[0].id;
-  selectedCorner=Math.min(CENTER,Math.max(0,data.selectedCorner|0));
+  selectedCorner=Math.max(0,data.selectedCorner|0);
+  editMode=data.editMode==='shape'?'shape':'frame';
   if(data.ui){
     showGrid.checked=data.ui.showGrid!==false;
     showAllHandles.checked=data.ui.showAllHandles!==false;
