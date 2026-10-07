@@ -63,6 +63,7 @@ button.danger{border-color:#704040;color:#ffd0d0}
 body.projection-only #topbar,
 body.projection-only #sidepanel,
 body.projection-only #status{display:none}
+body.projection-only,body.projection-only #overlayCanvas{cursor:none}
 
 h2{font-size:18px;margin:0 0 12px}
 .surface-list{display:grid;gap:8px;margin:10px 0 14px}
@@ -707,10 +708,31 @@ document.querySelectorAll('[data-dx]').forEach(btn=>btn.addEventListener('click'
   moveNode(n.id,n.x+px/window.innerWidth,n.y+py/window.innerHeight);render();
 }));
 
-projectionBtn.addEventListener('click',()=>{
-  document.body.classList.toggle('projection-only');
-  projectionBtn.textContent=document.body.classList.contains('projection-only')?'Poistu projisointitilasta':'Projisointitila';
+let wakeLock=null;
+async function requestWakeLock(){
+  if(!('wakeLock' in navigator)||wakeLock)return;
+  try{
+    wakeLock=await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release',()=>{wakeLock=null;});
+  }catch(_){}
+}
+function releaseWakeLock(){
+  if(wakeLock){wakeLock.release().catch(()=>{});wakeLock=null;}
+}
+const isProjectionMode=()=>document.body.classList.contains('projection-only');
+function setProjectionMode(on){
+  document.body.classList.toggle('projection-only',on);
+  projectionBtn.textContent=on?'Poistu projisointitilasta':'Projisointitila';
+  if(on){requestWakeLock();status.textContent='Projisointitila: Esc tai tuplanapautus palaa muokkaukseen.';}
+  else releaseWakeLock();
   render();
+}
+projectionBtn.addEventListener('click',()=>setProjectionMode(!isProjectionMode()));
+// Kosketuslaitteilla ei ole Esc-näppäintä: tuplanapautus palaa muokkaukseen.
+overlayCanvas.addEventListener('dblclick',()=>{if(isProjectionMode())setProjectionMode(false);});
+// Selain vapauttaa wake lockin, kun välilehti piilotetaan; pyydetään uudelleen palatessa.
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&isProjectionMode())requestWakeLock();
 });
 fullscreenBtn.addEventListener('click',async()=>{
   try{
@@ -730,9 +752,7 @@ resetViewBtn.addEventListener('click',()=>{
 });
 
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape'&&document.body.classList.contains('projection-only')){
-    document.body.classList.remove('projection-only');projectionBtn.textContent='Projisointitila';render();return;
-  }
+  if(e.key==='Escape'&&isProjectionMode()){setProjectionMode(false);return;}
   const tag=document.activeElement&&document.activeElement.tagName;
   if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA')return;
   const s=activeSurface();if(!s||s.locked)return;
