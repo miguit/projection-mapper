@@ -190,6 +190,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
     <select id="shapeKind">
       <option value="quad">Nelikulmio</option>
       <option value="poly">Monikulmio (8 pistettä)</option>
+      <option value="ellipse">Ympyrä / ellipsi</option>
     </select>
     <div class="controls" id="editModeRow" style="margin-top:8px">
       <button id="editFrameBtn">Muokkaa kehystä</button>
@@ -438,15 +439,20 @@ function makeTexture(){
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([0,0,0,255]));
   return t;
 }
-function createSurface(offset=0){
+function createSurface(offset=0,kind='quad'){
   const ox=0.10+offset,oy=0.12+offset;
+  let w=.42,h=.42;
+  if(kind==='ellipse'){ // ympyrä: kehys on näytöllä neliö
+    const side=.42*Math.min(window.innerWidth,window.innerHeight);
+    w=side/window.innerWidth;h=side/window.innerHeight;
+  }
   const s={
     id:nextSurfaceId++,name:'',
-    nodeIds:[makeNode(ox,oy),makeNode(ox+.42,oy),makeNode(ox+.42,oy+.42),makeNode(ox,oy+.42)],
+    nodeIds:[makeNode(ox,oy),makeNode(ox+w,oy),makeNode(ox+w,oy+h),makeNode(ox,oy+h)],
     texture:makeTexture(),contentType:'none',video:null,objectUrl:null,fileName:'',
     shareFrom:null,opacity:1,visible:true,locked:false,
     fitMode:'fit',zoom:1,sourceAspect:1,hasMedia:false,pattern:null,
-    mask:{kind:'quad',points:[],radius:0},maskTex:null,maskKey:''
+    mask:{kind,points:defaultShapePoints(kind),radius:0},maskTex:null,maskKey:''
   };
   s.name='Pinta '+s.id;surfaces.push(s);selectedSurfaceId=s.id;selectedCorner=0;return s;
 }
@@ -505,7 +511,12 @@ function defaultShapePoints(kind){
   return [[0,0],[.5,0],[1,0],[1,.5],[1,1],[.5,1],[0,1],[0,.5]].map(([u,v])=>({u,v}));
 }
 const shapeUsesMask=s=>s.mask.kind!=='quad'||s.mask.radius>0;
+const SHAPE_NAMES={quad:'Nelikulmio',poly:'Monikulmio (8 pistettä)',ellipse:'Ympyrä / ellipsi'};
 function shapeOutlineUV(s){
+  if(s.mask.kind==='ellipse'){
+    // Ellipsi sivuaa kehystä; perspektiivi tekee siitä seinällä oikean muotoisen.
+    return Array.from({length:96},(_,i)=>{const a=i/96*Math.PI*2;return{u:.5+.5*Math.cos(a),v:.5+.5*Math.sin(a)};});
+  }
   if(s.mask.kind==='poly')return s.mask.points.map(p=>({u:p.u,v:p.v}));
   return [{u:0,v:0},{u:1,v:0},{u:1,v:1},{u:0,v:1}];
 }
@@ -843,16 +854,24 @@ function hitCorner(p){
   return best;
 }
 function hidePointMenu(){pointMenu.style.display='none';}
-function showPointMenu(clientX,clientY,hit){
-  const users=surfacesUsingNode(hit.node.id);
+// Avaa ponnahdusvalikon; build(item,separator) lisää rivit.
+function openMenu(clientX,clientY,titleText,build){
   pointMenu.innerHTML='';
-  const title=document.createElement('div');title.className='menu-title';
-  title.textContent=users.length>1?`Yhteinen piste · ${users.length} pintaa`:`${hit.s.name} · kulma ${hit.corner+1}`;
+  const title=document.createElement('div');title.className='menu-title';title.textContent=titleText;
   pointMenu.appendChild(title);
   const item=(text,fn,disabled)=>{
     const b=document.createElement('button');b.textContent=text;b.disabled=!!disabled;
     b.addEventListener('click',()=>{hidePointMenu();fn();});pointMenu.appendChild(b);
   };
+  build(item,()=>pointMenu.appendChild(document.createElement('hr')));
+  pointMenu.style.display='block';
+  const w=pointMenu.offsetWidth,h=pointMenu.offsetHeight;
+  pointMenu.style.left=Math.max(8,Math.min(clientX,window.innerWidth-w-8))+'px';
+  pointMenu.style.top=Math.max(8,Math.min(clientY,window.innerHeight-h-8))+'px';
+}
+function showPointMenu(clientX,clientY,hit){
+  const users=surfacesUsingNode(hit.node.id);
+  openMenu(clientX,clientY,users.length>1?`Yhteinen piste · ${users.length} pintaa`:`${hit.s.name} · kulma ${hit.corner+1}`,(item,separator)=>{
   if(users.length<2){
     item('Piste ei ole yhteinen muiden kanssa',()=>{},true);
   }else{
@@ -861,7 +880,7 @@ function showPointMenu(clientX,clientY,hit){
       status.textContent=n?`Yhteinen piste irrotettiin (${n} ${n===1?'kulma':'kulmaa'} siirrettiin erilleen).`:'Lukittuja pintoja ei irroteta.';
       render();
     },users.every(s=>s.locked));
-    pointMenu.appendChild(document.createElement('hr'));
+    separator();
     for(const s of users){
       item(`Irrota vain ${s.name}${s.locked?' (lukittu)':''}`,()=>{
         if(detachSurfaceFromNode(s,hit.node.id))status.textContent=`${s.name}: kulma irrotettiin yhteisestä pisteestä.`;
@@ -869,10 +888,7 @@ function showPointMenu(clientX,clientY,hit){
       },s.locked);
     }
   }
-  pointMenu.style.display='block';
-  const w=pointMenu.offsetWidth,h=pointMenu.offsetHeight;
-  pointMenu.style.left=Math.max(8,Math.min(clientX,window.innerWidth-w-8))+'px';
-  pointMenu.style.top=Math.max(8,Math.min(clientY,window.innerHeight-h-8))+'px';
+  });
 }
 overlayCanvas.addEventListener('contextmenu',e=>{
   e.preventDefault();
@@ -945,11 +961,19 @@ overlayCanvas.addEventListener('pointerup',e=>{
 });
 overlayCanvas.addEventListener('pointercancel',()=>{cancelLongPress();dragging=null;});
 
-function addSurface(){
+function addSurface(kind){
   const off=((surfaces.length*0.025)%0.16);
-  createSurface(off);render();
+  createSurface(off,kind);
+  editMode=kind==='poly'?'shape':'frame';selectedCorner=kind==='poly'?SHAPE_BASE:0;
+  render();
 }
-addSurfaceBtn.addEventListener('click',addSurface);addSurfaceBtn2.addEventListener('click',addSurface);
+function openAddMenu(e){
+  const r=e.currentTarget.getBoundingClientRect();
+  openMenu(r.left,r.bottom+6,'Lisää pinta',item=>{
+    for(const kind of Object.keys(SHAPE_NAMES))item(SHAPE_NAMES[kind],()=>addSurface(kind));
+  });
+}
+addSurfaceBtn.addEventListener('click',openAddMenu);addSurfaceBtn2.addEventListener('click',openAddMenu);
 
 deleteSurfaceBtn.addEventListener('click',()=>{
   if(surfaces.length<=1){status.textContent='Vähintään yksi pinta pitää olla olemassa.';return;}
@@ -985,7 +1009,9 @@ shapeKind.addEventListener('change',()=>{
   if(s.locked){status.textContent='Pinta on lukittu.';render();return;}
   s.mask.kind=kind;
   s.mask.points=kind==='poly'?(s.mask.points.length>=3?s.mask.points:defaultShapePoints('poly')):[];
-  setEditMode(kind==='poly'?'shape':'frame');
+  if(kind==='ellipse')status.textContent='Ympyrä sovitetaan kehyksen sisään. Tee kehyksestä neliö, jos haluat ympyrän.';
+  editMode=kind==='poly'?'shape':'frame';selectedCorner=kind==='poly'?SHAPE_BASE:0;
+  render();
 });
 
 contentMode.addEventListener('change',()=>{
@@ -1179,7 +1205,7 @@ function saveState(){
 function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(saveState,300);}
 window.addEventListener('pagehide',()=>{clearTimeout(saveTimer);saveState();});
 
-const MASK_KINDS=['quad','poly'];
+const MASK_KINDS=['quad','poly','ellipse'];
 function restoreMask(m){
   const out={kind:'quad',points:[],radius:0};
   if(!m||!MASK_KINDS.includes(m.kind))return out;
