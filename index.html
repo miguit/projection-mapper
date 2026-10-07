@@ -202,7 +202,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
       <button id="editFrameBtn">Muokkaa kehystä</button>
       <button id="editShapeBtn">Muokkaa muotoa</button>
     </div>
-    <small>Kehyksen kulmat 1–4 määräävät perspektiivin. Muotopisteet rajaavat, mikä osa valaistaan; kehys laajenee, jos pisteen vetää sen ulkopuolelle. E vaihtaa tilaa. Muototilassa tuplaklikkaus reunalla lisää pisteen, Delete poistaa valitun.</small>
+    <small>Kehyksen kulmat 1–4 määräävät perspektiivin. Muotopisteet rajaavat, mikä osa valaistaan; kehys mukautuu muodon kokoon. E vaihtaa tilaa. Muototilassa tuplaklikkaus reunalla lisää pisteen, Delete poistaa valitun.</small>
   </div>
 
   <div class="row">
@@ -610,8 +610,8 @@ function screenToUV(s,p,clamp=true){
   if(!clamp)return{u:q.x,v:q.y};
   return{u:Math.max(0,Math.min(1,q.x)),v:Math.max(0,Math.min(1,q.y))};
 }
-// Siirtää muotopisteen näytön pisteeseen p. Jos piste menee kehyksen ulkopuolelle, kehys laajenee
-// samassa perspektiivissä niin, että kaikki muotopisteet mahtuvat sen sisään.
+// Siirtää muotopisteen näytön pisteeseen p. Kehys sovitetaan samassa perspektiivissä
+// tiukasti muotopisteiden ympärille (laajenee ja pienenee muodon mukana).
 function moveShapePoint(s,index,p){
   const pt=s.mask.points[index];if(!pt)return;
   p={x:Math.max(0,Math.min(1,p.x)),y:Math.max(0,Math.min(1,p.y))};
@@ -621,13 +621,15 @@ function moveShapePoint(s,index,p){
   if(!isFinite(uv.u)||!isFinite(uv.v)||Math.sign(w(uv.u,uv.v))!==Math.sign(w(.5,.5)))return;
   const prev={u:pt.u,v:pt.v};
   Object.assign(pt,uv);
-  if(!expandFrameToFit(s,H))Object.assign(pt,prev);
+  if(!fitFrameToShape(s,H))Object.assign(pt,prev);
 }
-function expandFrameToFit(s,H){
-  const pts=s.mask.points;
-  const minU=Math.min(0,...pts.map(p=>p.u)),maxU=Math.max(1,...pts.map(p=>p.u));
-  const minV=Math.min(0,...pts.map(p=>p.v)),maxV=Math.max(1,...pts.map(p=>p.v));
-  if(minU>=0&&maxU<=1&&minV>=0&&maxV<=1)return true;
+function fitFrameToShape(s,H=surfaceH(s)){
+  const pts=s.mask.points;if(pts.length<3)return true;
+  const minU=Math.min(...pts.map(p=>p.u)),maxU=Math.max(...pts.map(p=>p.u));
+  const minV=Math.min(...pts.map(p=>p.v)),maxV=Math.max(...pts.map(p=>p.v));
+  const eps=1e-6;
+  if(Math.abs(minU)<eps&&Math.abs(maxU-1)<eps&&Math.abs(minV)<eps&&Math.abs(maxV-1)<eps)return true;
+  if(maxU-minU<0.01||maxV-minV<0.01)return false; // muoto litistyisi viivaksi
   const ref=Math.sign(H[6]*.5+H[7]*.5+H[8]);
   const uvCorners=[[minU,minV],[maxU,minV],[maxU,maxV],[minU,maxV]];
   if(uvCorners.some(([u,v])=>Math.sign(H[6]*u+H[7]*v+H[8])!==ref))return false;
@@ -637,7 +639,7 @@ function expandFrameToFit(s,H){
   for(const p of pts){p.u=(p.u-minU)/su;p.v=(p.v-minV)/sv;}
   px.forEach((q,i)=>{
     const x=q.x/glCanvas.width,y=q.y/glCanvas.height,id=s.nodeIds[i];
-    // Yhteistä kulmaa ei siirretä, ettei naapuripinta vääristy: laajentuva pinta saa oman kulmansa.
+    // Yhteistä kulmaa ei siirretä, ettei naapuripinta vääristy: sovitettava pinta saa oman kulmansa.
     if(surfaces.some(o=>o!==s&&o.nodeIds.includes(id)))s.nodeIds[i]=makeNode(x,y);
     else{const n=nodes.get(id);n.x=x;n.y=y;}
   });
@@ -970,6 +972,7 @@ function removeShapePoint(s,index){
   if(s.mask.points.length<=3){status.textContent='Monikulmiossa pitää olla vähintään 3 pistettä.';return;}
   ensureRadii(s);
   s.mask.points.splice(index,1);s.mask.radii.splice(index,1);
+  fitFrameToShape(s);
   selectedCorner=SHAPE_BASE+Math.max(0,index-1);
   status.textContent=`Muotopiste poistettu (${s.mask.points.length} pistettä).`;
 }
