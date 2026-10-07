@@ -197,7 +197,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
       <button class="right" data-dx="1" data-dy="0">→</button>
       <button class="down" data-dx="0" data-dy="1">↓</button>
     </div>
-    <small>Hienosäätö suhteessa koko projisointipintaan. Yhteiset pisteet liikkuvat yhdessä.</small>
+    <small>Hienosäätö suhteessa koko projisointipintaan. Yhteiset pisteet liikkuvat yhdessä. Keskikahvasta siirtyy koko pinta.</small>
   </div>
 
   <hr>
@@ -367,7 +367,8 @@ const patternLoc=gl.getUniformLocation(program,'u_pattern');
 const PATTERNS={grid:{name:'ruudukko',id:1},checker:{name:'shakkiruudukko',id:2},bars:{name:'väripalkit',id:3},white:{name:'valkoinen',id:4}};
 const posBuffer=gl.createBuffer(),texBuffer=gl.createBuffer();
 
-const cornerNames=['Vasen ylä','Oikea ylä','Oikea ala','Vasen ala'];
+const cornerNames=['Vasen ylä','Oikea ylä','Oikea ala','Vasen ala','Koko pinta'];
+const CENTER=4; // selectedCorner-arvo, kun keskikahva (koko pinta) on valittuna
 const SNAP_PX=18;
 
 let nextNodeId=1,nextSurfaceId=1,selectedSurfaceId=null,selectedCorner=0,dragging=null;
@@ -556,6 +557,16 @@ function drawHandles(s){
       octx.textAlign='center';octx.textBaseline='middle';octx.fillText(String(i+1),p.x,p.y);
     }
   }
+  // Keskikahva: neliö, jossa siirtoristi
+  const c=surfaceCenterPx(s),sel=active&&selectedCorner===CENTER,half=(sel?12:active?10:7)*dpr;
+  octx.beginPath();octx.rect(c.x-half,c.y-half,half*2,half*2);
+  octx.fillStyle=active?'#fff':'rgba(255,255,255,.55)';octx.fill();
+  octx.lineWidth=(sel?3:2)*dpr;octx.strokeStyle=sel?'#58a6ff':'rgba(0,0,0,.7)';octx.stroke();
+  if(active){
+    const a=half*0.6;
+    octx.beginPath();octx.moveTo(c.x-a,c.y);octx.lineTo(c.x+a,c.y);octx.moveTo(c.x,c.y-a);octx.lineTo(c.x,c.y+a);
+    octx.lineWidth=2*dpr;octx.strokeStyle='#000';octx.stroke();
+  }
 }
 function renderOverlay(){
   octx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);
@@ -634,6 +645,25 @@ function moveNode(id,x,y){
   const n=nodes.get(id);if(!n)return;
   n.x=Math.max(0,Math.min(1,x));n.y=Math.max(0,Math.min(1,y));
 }
+function surfaceCenterPx(s){
+  return applyH(Hsq(...s.nodeIds.map(id=>pxPoint(nodes.get(id)))),0.5,0.5);
+}
+// Siirtää kaikkia pinnan kulmia; siirto rajataan niin, ettei muoto vääristy ruudun reunalla.
+function moveSurface(s,dx,dy){
+  const ns=[...new Set(s.nodeIds)].map(id=>nodes.get(id));
+  const minX=Math.min(...ns.map(n=>n.x)),maxX=Math.max(...ns.map(n=>n.x));
+  const minY=Math.min(...ns.map(n=>n.y)),maxY=Math.max(...ns.map(n=>n.y));
+  dx=Math.max(-minX,Math.min(1-maxX,dx));dy=Math.max(-minY,Math.min(1-maxY,dy));
+  for(const n of ns){n.x+=dx;n.y+=dy;}
+}
+// Nuolinäppäimet ja hienosäätönapit: siirto pikseleinä valitulle kulmalle tai koko pinnalle.
+function nudgeSelection(pxX,pxY){
+  const s=activeSurface();if(!s||s.locked)return;
+  const dx=pxX/window.innerWidth,dy=pxY/window.innerHeight;
+  if(selectedCorner===CENTER)moveSurface(s,dx,dy);
+  else{const n=cornerNode(s,selectedCorner);moveNode(n.id,n.x+dx,n.y+dy);}
+  render();
+}
 function snapCornerIfNeeded(s,i){
   const node=cornerNode(s,i),target=nearestCorner(node.x,node.y,s);
   if(!target)return false;
@@ -651,21 +681,32 @@ overlayCanvas.addEventListener('pointerdown',e=>{
     const dx=(n.x-p.x)/hitX,dy=(n.y-p.y)/hitY,d=dx*dx+dy*dy;
     if(d<1&&d<bestD){bestD=d;best={s,corner:i};}
   }}
+  if(!best){
+    for(const s of surfaces){
+      if(!s.visible||(s.id!==selectedSurfaceId&&!showAllHandles.checked))continue;
+      const c=surfaceCenterPx(s);
+      const dx=(c.x/glCanvas.width-p.x)/hitX,dy=(c.y/glCanvas.height-p.y)/hitY,d=dx*dx+dy*dy;
+      if(d<1&&d<bestD){bestD=d;best={s,corner:CENTER};}
+    }
+  }
   if(!best)return;
   selectedSurfaceId=best.s.id;selectedCorner=best.corner;
   if(best.s.locked){render();return;}
-  dragging={surfaceId:best.s.id,corner:best.corner};
+  dragging={surfaceId:best.s.id,corner:best.corner,last:p};
   overlayCanvas.setPointerCapture(e.pointerId);render();
 });
 overlayCanvas.addEventListener('pointermove',e=>{
   if(!dragging)return;
   const s=getSurface(dragging.surfaceId);if(!s||s.locked)return;
-  const p=pointerPos(e);moveNode(s.nodeIds[dragging.corner],p.x,p.y);render();
+  const p=pointerPos(e);
+  if(dragging.corner===CENTER){moveSurface(s,p.x-dragging.last.x,p.y-dragging.last.y);dragging.last=p;}
+  else moveNode(s.nodeIds[dragging.corner],p.x,p.y);
+  render();
 });
 overlayCanvas.addEventListener('pointerup',e=>{
   if(dragging){
     const s=getSurface(dragging.surfaceId);
-    if(s&&!s.locked&&snapCornerIfNeeded(s,dragging.corner))status.textContent='Kulma napsahti yhteiseen pisteeseen.';
+    if(s&&!s.locked&&dragging.corner!==CENTER&&snapCornerIfNeeded(s,dragging.corner))status.textContent='Kulma napsahti yhteiseen pisteeseen.';
   }
   dragging=null;try{overlayCanvas.releasePointerCapture(e.pointerId)}catch(_){}render();
 });
@@ -690,6 +731,7 @@ deleteSurfaceBtn.addEventListener('click',()=>{
 
 detachCornerBtn.addEventListener('click',()=>{
   const s=activeSurface();if(!s||s.locked)return;
+  if(selectedCorner===CENTER){status.textContent='Valitse ensin kulma (1–4), jonka haluat irrottaa.';return;}
   const old=cornerNode(s,selectedCorner);
   const shared=surfaces.reduce((n,sf)=>n+sf.nodeIds.filter(id=>id===old.id).length,0);
   if(shared<=1){status.textContent='Valittu kulma ei ole yhteinen muiden pintojen kanssa.';return;}
@@ -766,10 +808,7 @@ zoom.addEventListener('input',()=>{const s=activeSurface();if(s){s.zoom=Number(z
 showGrid.addEventListener('change',render);showAllHandles.addEventListener('change',render);gridSize.addEventListener('change',render);
 
 document.querySelectorAll('[data-dx]').forEach(btn=>btn.addEventListener('click',()=>{
-  const s=activeSurface();if(!s||s.locked)return;
-  const n=cornerNode(s,selectedCorner);
-  const px=Number(btn.dataset.dx),py=Number(btn.dataset.dy);
-  moveNode(n.id,n.x+px/window.innerWidth,n.y+py/window.innerHeight);render();
+  nudgeSelection(Number(btn.dataset.dx),Number(btn.dataset.dy));
 }));
 
 let wakeLock=null;
@@ -828,8 +867,7 @@ document.addEventListener('keydown',e=>{
   else if(e.key==='ArrowDown')dy=step;
   else return;
   e.preventDefault();
-  const n=cornerNode(s,selectedCorner);
-  moveNode(n.id,n.x+dx/window.innerWidth,n.y+dy/window.innerHeight);render();
+  nudgeSelection(dx,dy);
 });
 
 function loop(){
@@ -904,7 +942,7 @@ function restoreState(){
   nextNodeId=Math.max(data.nextNodeId||1,...nodes.keys())+1;
   nextSurfaceId=Math.max(data.nextSurfaceId||1,...surfaces.map(s=>s.id))+1;
   selectedSurfaceId=getSurface(data.selectedSurfaceId)?data.selectedSurfaceId:surfaces[0].id;
-  selectedCorner=Math.min(3,Math.max(0,data.selectedCorner|0));
+  selectedCorner=Math.min(CENTER,Math.max(0,data.selectedCorner|0));
   if(data.ui){
     showGrid.checked=data.ui.showGrid!==false;
     showAllHandles.checked=data.ui.showAllHandles!==false;
