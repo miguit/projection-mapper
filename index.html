@@ -202,7 +202,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
       <button id="editFrameBtn">Muokkaa kehystä</button>
       <button id="editShapeBtn">Muokkaa muotoa</button>
     </div>
-    <small>Kehyksen kulmat 1–4 määräävät perspektiivin. Muotopisteet rajaavat kehyksen sisältä, mikä osa valaistaan. E vaihtaa tilaa. Muototilassa tuplaklikkaus reunalla lisää pisteen, Delete poistaa valitun.</small>
+    <small>Kehyksen kulmat 1–4 määräävät perspektiivin. Muotopisteet rajaavat, mikä osa valaistaan; kehys laajenee, jos pisteen vetää sen ulkopuolelle. E vaihtaa tilaa. Muototilassa tuplaklikkaus reunalla lisää pisteen, Delete poistaa valitun.</small>
   </div>
 
   <div class="row">
@@ -605,9 +605,43 @@ function invertH(H){
 }
 const surfaceH=s=>Hsq(...s.nodeIds.map(id=>pxPoint(nodes.get(id))));
 // Näytön normalisoitu piste (0..1) -> pinnan uv
-function screenToUV(s,p){
+function screenToUV(s,p,clamp=true){
   const q=applyH(invertH(surfaceH(s)),p.x*glCanvas.width,p.y*glCanvas.height);
+  if(!clamp)return{u:q.x,v:q.y};
   return{u:Math.max(0,Math.min(1,q.x)),v:Math.max(0,Math.min(1,q.y))};
+}
+// Siirtää muotopisteen näytön pisteeseen p. Jos piste menee kehyksen ulkopuolelle, kehys laajenee
+// samassa perspektiivissä niin, että kaikki muotopisteet mahtuvat sen sisään.
+function moveShapePoint(s,index,p){
+  const pt=s.mask.points[index];if(!pt)return;
+  p={x:Math.max(0,Math.min(1,p.x)),y:Math.max(0,Math.min(1,p.y))};
+  const H=surfaceH(s),uv=screenToUV(s,p,false);
+  // Hylätään pisteet perspektiivin horisontin takana (homografian w vaihtaa merkkiä).
+  const w=(u,v)=>H[6]*u+H[7]*v+H[8];
+  if(!isFinite(uv.u)||!isFinite(uv.v)||Math.sign(w(uv.u,uv.v))!==Math.sign(w(.5,.5)))return;
+  const prev={u:pt.u,v:pt.v};
+  Object.assign(pt,uv);
+  if(!expandFrameToFit(s,H))Object.assign(pt,prev);
+}
+function expandFrameToFit(s,H){
+  const pts=s.mask.points;
+  const minU=Math.min(0,...pts.map(p=>p.u)),maxU=Math.max(1,...pts.map(p=>p.u));
+  const minV=Math.min(0,...pts.map(p=>p.v)),maxV=Math.max(1,...pts.map(p=>p.v));
+  if(minU>=0&&maxU<=1&&minV>=0&&maxV<=1)return true;
+  const ref=Math.sign(H[6]*.5+H[7]*.5+H[8]);
+  const uvCorners=[[minU,minV],[maxU,minV],[maxU,maxV],[minU,maxV]];
+  if(uvCorners.some(([u,v])=>Math.sign(H[6]*u+H[7]*v+H[8])!==ref))return false;
+  const px=uvCorners.map(([u,v])=>applyH(H,u,v));
+  // Uusi kehys = vanha homografia rajattuna isompaan suorakulmioon, joten pisteet vain skaalataan uudelleen.
+  const su=maxU-minU,sv=maxV-minV;
+  for(const p of pts){p.u=(p.u-minU)/su;p.v=(p.v-minV)/sv;}
+  px.forEach((q,i)=>{
+    const x=q.x/glCanvas.width,y=q.y/glCanvas.height,id=s.nodeIds[i];
+    // Yhteistä kulmaa ei siirretä, ettei naapuripinta vääristy: laajentuva pinta saa oman kulmansa.
+    if(surfaces.some(o=>o!==s&&o.nodeIds.includes(id)))s.nodeIds[i]=makeNode(x,y);
+    else{const n=nodes.get(id);n.x=x;n.y=y;}
+  });
+  return true;
 }
 const uvToPx=(s,pt)=>applyH(surfaceH(s),pt.u,pt.v);
 const isShapeEditing=()=>{const s=activeSurface();return editMode==='shape'&&s&&s.mask.kind==='poly';};
@@ -862,9 +896,9 @@ function nudgeSelection(pxX,pxY){
   const dx=pxX/window.innerWidth,dy=pxY/window.innerHeight;
   if(selectedCorner===CENTER)moveSurface(s,dx,dy);
   else if(selectedCorner>=SHAPE_BASE){
-    const pt=s.mask.points[selectedCorner-SHAPE_BASE];if(!pt)return;
+    const i=selectedCorner-SHAPE_BASE,pt=s.mask.points[i];if(!pt)return;
     const q=uvToPx(s,pt);
-    Object.assign(pt,screenToUV(s,{x:q.x/glCanvas.width+dx,y:q.y/glCanvas.height+dy}));
+    moveShapePoint(s,i,{x:q.x/glCanvas.width+dx,y:q.y/glCanvas.height+dy});
   }
   else{const n=cornerNode(s,selectedCorner);moveNode(n.id,n.x+dx,n.y+dy);}
   render();
@@ -1072,7 +1106,7 @@ overlayCanvas.addEventListener('pointermove',e=>{
   const s=getSurface(dragging.surfaceId);if(!s||s.locked)return;
   const p=pointerPos(e);
   if(dragging.corner===CENTER){moveSurface(s,p.x-dragging.last.x,p.y-dragging.last.y);dragging.last=p;}
-  else if(dragging.corner>=SHAPE_BASE){const pt=s.mask.points[dragging.corner-SHAPE_BASE];if(pt)Object.assign(pt,screenToUV(s,p));}
+  else if(dragging.corner>=SHAPE_BASE)moveShapePoint(s,dragging.corner-SHAPE_BASE,p);
   else moveNode(s.nodeIds[dragging.corner],p.x,p.y);
   render();
 });
